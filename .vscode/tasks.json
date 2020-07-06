@@ -1,0 +1,46 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        
+        {
+            "label": "debug-headless",
+            "type": "shell",
+            "command": "$SHELL --init-file debug.sh",
+            "isBackground": true,
+            "problemMatcher":{
+                "owner": "go",
+				"applyTo": "allDocuments",
+				"fileLocation": [
+					"absolute"
+				],
+				"pattern": {
+					"regexp": ".*",
+					"file": 1,
+					"location": 2,
+					"message": 3
+				},				
+                "background": {
+                    "beginsPattern":"start debug server",
+                    "endsPattern":"API server listening"}
+            }
+        },
+        {
+            "label": "build and debug",
+            "type": "shell",
+            "command": "sleep 5",
+            "dependsOn":["debug-headless"],
+            "isBackground": true,
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            }
+        }
+    
+    ]
+}
