@@ -9,10 +9,10 @@
             "type": "go",
             "request": "attach",
             "mode": "remote",
-            "remotePath": "${workspaceFolder}/src",
+            "remotePath": "${workspaceFolder}/cmd",
             "host": "127.0.0.1",
             "port": 2345,
-            "cwd": "${workspaceFolder}/src",
+            "cwd": "${workspaceFolder}/cmd",
             "preLaunchTask": "debug-headless"
         }
     ]
