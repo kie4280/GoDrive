@@ -1,6 +1,7 @@
 package godrive
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -15,7 +16,8 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
-	// "regexp"
+	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -35,15 +37,17 @@ var (
 	fileqMux          sync.Mutex
 	foldwMux          sync.Mutex
 	filewMux          sync.Mutex
+	reRateLimit       *regexp.Regexp
 )
 
 const (
-	foldersearchFields = "nextPageToken, files(id, name, mimeType, modifiedTime, parents)"
-	filesearchFields   = "nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, parents)"
-	maxGoroutine       = 10
-	minGoroutine       = 2
-	batchSize          = 300
-	minWaitingBatch    = 20
+	foldersearchFields  = "nextPageToken, files(id, name, mimeType, modifiedTime, parents)"
+	filesearchFields    = "nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, parents)"
+	maxGoroutine        = 10
+	minGoroutine        = 2
+	batchSize           = 100
+	minWaitingBatch     = 4
+	userRateLimitExceed = "User Rate Limit Exceeded"
 )
 
 type foldBatch struct {
@@ -109,7 +113,7 @@ func saveToken(path string, token *oauth2.Token) {
 	json.NewEncoder(f).Encode(token)
 }
 
-// NewService creates drive clients
+// NewService creates a drive client
 func NewService() *drive.Service {
 	if service == nil {
 		b, err := ioutil.ReadFile("./secrets/client_secret_1.json")
@@ -147,14 +151,15 @@ func makeBatch(ids *list.List, nextPage string) *foldBatch {
 	return root
 }
 
-// ListAll write a list of folders to "location"
-func ListAll(location string) *drive.FileList {
+// ListAll write a list of folders and files to "location". Returns (folder count, file count)
+func ListAll(location string) (int, int) {
 	p, errP := ants.NewPoolWithFunc(maxGoroutine, recursiveFoldSearch)
 	if errP != nil {
 		log.Fatalf("There is a problem starting goroutines: %v", errP)
 	}
 	defer p.Release()
 	onGoingRequests = 0
+	reRateLimit = regexp.MustCompile(userRateLimitExceed)
 	canRun = true
 	isRunning = true
 	foldersearchQueue = lane.NewQueue()
@@ -163,23 +168,27 @@ func ListAll(location string) *drive.FileList {
 	foldersearchQueue.Enqueue(makeBatch(ll, ""))
 	var foldChan chan []byte = make(chan []byte, 1000)
 	var fileChan chan []byte = make(chan []byte, 1000)
+	var filecount, foldcount int32 = 0, 0
 
 	var workDone bool = foldersearchQueue.Empty() && atomic.LoadInt32(&onGoingRequests) == 0
 	for !workDone && canRun {
 
 		largeQueue := foldersearchQueue.Size() > minWaitingBatch
-		atomic.AddInt32(&onGoingRequests, 1)
 
 		if largeQueue {
 			for i := 0; i < maxGoroutine; i++ {
-				p.Invoke([3]interface{}{foldChan, fileChan, foldersearchQueue.Dequeue()})
+				atomic.AddInt32(&onGoingRequests, 1)
+				p.Invoke([5]interface{}{foldChan, fileChan, foldersearchQueue.Dequeue(), &foldcount, &filecount})
 			}
 
 		} else if !largeQueue && maxGoroutine-p.Free() <= minGoroutine {
-			p.Invoke([3]interface{}{foldChan, fileChan, foldersearchQueue.Dequeue()})
-			time.Sleep(100 * time.Millisecond) // sleep longer
+			atomic.AddInt32(&onGoingRequests, 1)
+			p.Invoke([5]interface{}{foldChan, fileChan, foldersearchQueue.Dequeue(), &foldcount, &filecount})
+			time.Sleep(10 * time.Millisecond) // sleep longer
 		}
-		atomic.AddInt32(&requestInterv, -10)
+		if atomic.LoadInt32(&requestInterv) > 0 {
+			atomic.AddInt32(&requestInterv, -10)
+		}
 
 		time.Sleep(time.Duration(atomic.LoadInt32(&requestInterv)) * time.Millisecond) // preventing exceed user rate limit
 
@@ -188,21 +197,23 @@ func ListAll(location string) *drive.FileList {
 	}
 	isRunning = false
 
-	return new(drive.FileList)
+	return int(foldcount), int(filecount)
 }
 
 func recursiveFoldSearch(args interface{}) {
-	unpackArgs := args.([3]interface{})
+	unpackArgs := args.([5]interface{})
 	writeFold := unpackArgs[0].(chan []byte)
 	writeFile := unpackArgs[1].(chan []byte)
 	_ = writeFile
 	_ = writeFold
 	batch, ok := unpackArgs[2].(*foldBatch)
+	foldcount := unpackArgs[3].(*int32)
+	filecount := unpackArgs[4].(*int32)
 	if !ok || batch == nil {
 		atomic.AddInt32(&onGoingRequests, -1)
 		return
 	}
-	fmt.Printf("recursiveFold\n")
+	// fmt.Printf("recursiveFold\n")
 
 	var str strings.Builder
 	str.WriteString("(")
@@ -215,14 +226,23 @@ func recursiveFoldSearch(args interface{}) {
 		}
 	}
 	str.WriteString(") and trashed=false")
-	fmt.Printf("string buffer: %s\n", str.String())
+	// fmt.Printf("string buffer: %s\n", str.String())
+
 	r, err := NewService().Files.List().PageSize(1000).
 		Fields(foldersearchFields).
-		Q(str.String()).
+		Q(str.String()).PageToken(batch.nextPageToken).
 		Spaces("drive").Corpora("user").Do()
 	if err != nil {
-		fmt.Printf("Retrieve error: %v", err)
-		atomic.AddInt32(&requestInterv, 200)
+		fmt.Printf("google api error: %v", err)
+		foldersearchQueue.Enqueue(batch)
+		match := reRateLimit.FindString(err.Error())
+		if match != "" {
+			atomic.AddInt32(&requestInterv, 200)
+			atomic.AddInt32(&onGoingRequests, -1)
+			return
+		}
+		log.Fatalf("google api unexpected error: %v", err)
+
 	}
 
 	if r.NextPageToken != "" {
@@ -236,16 +256,18 @@ func recursiveFoldSearch(args interface{}) {
 			ll.PushBack(file.Id)
 			tt, err := file.MarshalJSON()
 			_ = err
-			fmt.Printf("file: %s \n", string(tt))
+			fmt.Printf("folder: %s \n", string(tt))
+			atomic.AddInt32(foldcount, 1)
 		} else {
 			tt, err := file.MarshalJSON()
 			_ = err
 			_ = tt
+			atomic.AddInt32(filecount, 1)
 		}
 
 		if ll.Len() > batchSize {
 			foldersearchQueue.Enqueue(makeBatch(ll, ""))
-			ll.Init()
+			ll = list.New()
 		}
 	}
 	if ll.Len() > 0 {
@@ -257,28 +279,30 @@ func recursiveFoldSearch(args interface{}) {
 
 }
 
-func writeFiles(location string, files chan []byte, folders chan []byte) {
-	errMk := os.MkdirAll(location+"/.GoDrive/", 0666)
-	folder, err1 := os.Create(location + "/.GoDrive/folders.json")
-	file, err2 := os.Create(location + "/.GoDrive/files.json")
-	defer folder.Close()
+func writeFiles(location string, filename string, outchan chan []byte) {
+	foldpath := filepath.Join(location, ".GoDrive")
+	errMk := os.MkdirAll(foldpath, 0666)
+	file, err := os.Create(filepath.Join(foldpath, filename))
+	writer := bufio.NewWriter(file)
 	defer file.Close()
-	if err1 != nil {
+
+	if err != nil {
 		debug.PrintStack()
-		log.Fatalf("Error creating file: %v", err1)
-	}
-	if err2 != nil {
-		debug.PrintStack()
-		log.Fatalf("Error creating file: %v", err2)
+		fmt.Printf("Error creating file: %v", err)
 	}
 	if errMk != nil {
 		debug.PrintStack()
-		log.Fatalf("Error creating directory: %v", errMk)
+		fmt.Printf("Error creating directory: %v", errMk)
 	}
 
 	for isRunning {
+		for _, i := range <-outchan {
+			writer.WriteByte(i)
+		}
 
 	}
+
+	writer.Flush()
 
 }
 
