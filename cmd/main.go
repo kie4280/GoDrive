@@ -8,9 +8,15 @@ import (
 
 func main() {
 	begin := time.Now()
-	r1, r2 := godrive.ListAll("dfg")
-	fmt.Printf("folders: %d files: %d\n", r1, r2)
+	gclient := godrive.NewClient()
+	sd := gclient.ListAll("dfg", "root")
+	select {
+	case r := <-sd:
+		r1, r2 := r.Folders, r.Files
+		fmt.Printf("folders: %d files: %d\n", r1, r2)
 
-	elapsed := time.Now().Sub(begin).Seconds()
-	fmt.Printf("time spent: %f s\n", elapsed)
+		elapsed := time.Now().Sub(begin).Seconds()
+		fmt.Printf("time spent: %f s\n", elapsed)
+	}
+
 }
