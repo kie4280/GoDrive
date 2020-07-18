@@ -48,8 +48,9 @@ type DriveClient struct {
 	regRateLimit       *regexp.Regexp
 	filecount          int32
 	foldcount          int32
-	errorChan          chan error
-	resultChan         chan *ListResult
+	progressChan       chan *Progress
+	rootDir            string
+	writeWait          sync.WaitGroup
 }
 
 type foldBatch struct {
@@ -57,21 +58,24 @@ type foldBatch struct {
 	nextPageToken string
 }
 
-// ListResult of the command
-type ListResult struct {
+// Progress of the command
+type Progress struct {
 	Files   int
 	Folders int
-	err     error
+	Done    bool
+	Error   error
 }
 
 func (drive *DriveClient) onError(err error) {
 
 	if err != nil {
-		var newError *ListResult = &ListResult{
+		var newError *Progress = &Progress{
 			Files:   -1,
 			Folders: -1,
-			err:     errors.New("DriveClient error: " + err.Error() + string(debug.Stack()))}
-		drive.resultChan <- newError
+			Error: errors.New("DriveClient error: " + err.Error() +
+				"\n" + string(debug.Stack())),
+			Done: false}
+		drive.progressChan <- newError
 	}
 }
 
@@ -168,33 +172,31 @@ func makeBatch(ids []string, nextPage string) *foldBatch {
 }
 
 // NewClient a new googledrive client
-func NewClient() *DriveClient {
+func NewClient(rootDir string) *DriveClient {
 	client := new(DriveClient)
 	client.service = newService()
-	client.foldersearchQueue = lane.NewQueue()
-	client.folderUnbatchSlice = make([]string, 0, 10*batchSize)
-	client.canRun = true
 	client.isRunning = false
+	client.canRun = false
 	client.onGoingRequests = 0
 	client.requestInterv = 20
 	client.regRateLimit = regexp.MustCompile(userRateLimitExceed)
 	client.filecount = 0
 	client.foldcount = 0
-	client.errorChan = make(chan error, 100)
-	client.resultChan = make(chan *ListResult, 100)
+	client.rootDir = rootDir
 
 	return client
 }
 
-// ListAll write a list of folders and files to "location". Returns ListResult struct
-func (drive *DriveClient) ListAll(location string, rootID string) chan *ListResult {
+// ListAll write a list of folders and files to "location". Returns Progress struct
+func (drive *DriveClient) ListAll(rootID string) chan *Progress {
 
 	newService()
-	go drive.listAll(location)
-	return drive.resultChan
+	drive.progressChan = make(chan *Progress, 10)
+	go drive.listAll(rootID)
+	return drive.progressChan
 }
 
-func (drive *DriveClient) listAll(location string) {
+func (drive *DriveClient) listAll(rootID string) {
 
 	p, errP := ants.NewPoolWithFunc(maxGoroutine, drive.recursiveFoldSearch)
 	if errP != nil {
@@ -214,11 +216,13 @@ func (drive *DriveClient) listAll(location string) {
 	var fileChan chan []byte = make(chan []byte, 10000)
 
 	drive.filecount, drive.foldcount = 0, 0
-	var workDone bool = drive.foldersearchQueue.Empty() && atomic.LoadInt32(&drive.onGoingRequests) == 0
+	var workDone bool = false
 
-	go drive.writeFiles(location, "folders.json", foldChan)
-	go drive.writeFiles(location, "files.json", fileChan)
-	go drive.Progress()
+	go drive.writeFiles("folders.json", foldChan)
+	go drive.writeFiles("files.json", fileChan)
+	drive.writeWait.Add(2)
+
+	go drive.ShowProgress()
 
 	for !workDone && drive.canRun {
 
@@ -230,12 +234,14 @@ func (drive *DriveClient) listAll(location string) {
 				drive.unBatchMux.Lock()
 				if len(drive.folderUnbatchSlice) >= batchSize {
 
-					drive.foldersearchQueue.Enqueue(makeBatch(drive.folderUnbatchSlice[:batchSize], ""))
+					drive.foldersearchQueue.Enqueue(
+						makeBatch(drive.folderUnbatchSlice[:batchSize], ""))
 					drive.folderUnbatchSlice = drive.folderUnbatchSlice[batchSize:]
 				}
 				drive.unBatchMux.Unlock()
 
-				drive.onError(p.Invoke([3]interface{}{foldChan, fileChan, drive.foldersearchQueue.Dequeue()}))
+				drive.onError(p.Invoke([3]interface{}{foldChan, fileChan,
+					drive.foldersearchQueue.Dequeue()}))
 			}
 
 		} else if !largeQueue && maxGoroutine-p.Free() <= minGoroutine {
@@ -243,31 +249,38 @@ func (drive *DriveClient) listAll(location string) {
 			drive.unBatchMux.Lock()
 			if len(drive.folderUnbatchSlice) >= batchSize {
 
-				drive.foldersearchQueue.Enqueue(makeBatch(drive.folderUnbatchSlice[:batchSize], ""))
+				drive.foldersearchQueue.Enqueue(
+					makeBatch(drive.folderUnbatchSlice[:batchSize], ""))
 				drive.folderUnbatchSlice = drive.folderUnbatchSlice[batchSize:]
 			} else if len(drive.folderUnbatchSlice) > 0 {
 				drive.foldersearchQueue.Enqueue(makeBatch(drive.folderUnbatchSlice, ""))
 				drive.folderUnbatchSlice = make([]string, 0, 10*batchSize)
 			}
 			drive.unBatchMux.Unlock()
-			drive.onError(p.Invoke([3]interface{}{foldChan, fileChan, drive.foldersearchQueue.Dequeue()}))
+			drive.onError(p.Invoke([3]interface{}{foldChan, fileChan,
+				drive.foldersearchQueue.Dequeue()}))
 			time.Sleep(100 * time.Millisecond) // sleep longer
 		}
 		if atomic.LoadInt32(&drive.requestInterv) > 0 {
 			atomic.AddInt32(&drive.requestInterv, -10)
 		}
 
-		time.Sleep(time.Duration(atomic.LoadInt32(&drive.requestInterv)) * time.Millisecond) // preventing exceed user rate limit
+		time.Sleep(time.Duration(atomic.LoadInt32(&drive.requestInterv)) *
+			time.Millisecond) // preventing exceed user rate limit
 		drive.unBatchMux.Lock()
-		workDone = drive.foldersearchQueue.Empty() && atomic.LoadInt32(&drive.onGoingRequests) == 0 && len(drive.folderUnbatchSlice) == 0
+		workDone = drive.foldersearchQueue.Empty() &&
+			atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
+			len(drive.folderUnbatchSlice) == 0
 		drive.unBatchMux.Unlock()
 
 	}
 	drive.isRunning = false
 	close(fileChan)
 	close(foldChan)
-	drive.resultChan <- &ListResult{Files: int(drive.filecount), Folders: int(drive.foldcount), err: nil}
-	close(drive.resultChan)
+	drive.writeWait.Wait()
+	drive.progressChan <- &Progress{Files: int(drive.filecount),
+		Folders: int(drive.foldcount), Error: nil, Done: true}
+	close(drive.progressChan)
 
 }
 
@@ -298,7 +311,7 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 	// fmt.Printf("string buffer: %s\n", str.String())
 
 	r, err := newService().Files.List().PageSize(1000).
-		Fields(foldersearchFields).
+		Fields(filesearchFields).
 		Q(str.String()).PageToken(batch.nextPageToken).
 		Spaces("drive").Corpora("user").Do()
 	if err != nil {
@@ -352,33 +365,27 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 
 }
 
-func (drive *DriveClient) writeFiles(location string, filename string, outchan chan []byte) {
-	foldpath := filepath.Join(location, ".GoDrive", "remote")
+func (drive *DriveClient) writeFiles(filename string, outchan chan []byte) {
+	foldpath := filepath.Join(drive.rootDir, ".GoDrive", "remote")
 	errMk := os.MkdirAll(foldpath, 0777)
+	drive.onError(errMk)
 	file, err := os.Create(filepath.Join(foldpath, filename))
+	drive.onError(err)
 	writer := bufio.NewWriter(file)
 	defer file.Close()
 
-	if err != nil {
-
-		fmt.Printf("Error creating file: %v\n", err)
-	}
-	if errMk != nil {
-
-		fmt.Printf("Error creating directory: %v\n", errMk)
-	}
-
 	_, err1 := writer.WriteString("[")
-	workdone := drive.foldersearchQueue.Empty() && atomic.LoadInt32(&drive.onGoingRequests) == 0
+	drive.onError(err1)
 	var i []byte
 	var ok bool = true
-	for !workdone && drive.canRun && ok {
-		i, ok = <-outchan
+	i, ok = <-outchan
+	for drive.canRun && ok {
+
 		for _, a := range i {
 			err := writer.WriteByte(a)
 			drive.onError(err)
 		}
-
+		i, ok = <-outchan
 		if ok {
 			e, err := writer.WriteString(",\n")
 			_ = e
@@ -388,20 +395,31 @@ func (drive *DriveClient) writeFiles(location string, filename string, outchan c
 	}
 
 	_, err2 := writer.WriteString("]")
-	err3 := writer.Flush()
-	drive.onError(err1)
 	drive.onError(err2)
+	err3 := writer.Flush()
 	drive.onError(err3)
+	drive.writeWait.Done()
 
 }
 
-// Progress report current progress
-func (drive *DriveClient) Progress() {
-	workDone := drive.foldersearchQueue.Empty() && atomic.LoadInt32(&drive.onGoingRequests) == 0
+// ShowProgress report current progress
+func (drive *DriveClient) ShowProgress() {
+	drive.unBatchMux.Lock()
+	workDone := drive.foldersearchQueue.Empty() &&
+		atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
+		len(drive.folderUnbatchSlice) == 0
+	drive.unBatchMux.Unlock()
 	for !workDone && drive.canRun {
-		fmt.Printf("request internal: %d files: %d folders: %d\n", atomic.LoadInt32(&drive.requestInterv), atomic.LoadInt32(&drive.filecount), atomic.LoadInt32(&drive.foldcount))
+		fmt.Printf("request internal: %d files: %d folders: %d\n",
+			atomic.LoadInt32(&drive.requestInterv),
+			atomic.LoadInt32(&drive.filecount),
+			atomic.LoadInt32(&drive.foldcount))
 		time.Sleep(1 * time.Second)
-		workDone = drive.foldersearchQueue.Empty() && atomic.LoadInt32(&drive.onGoingRequests) == 0
+		drive.unBatchMux.Lock()
+		workDone = drive.foldersearchQueue.Empty() &&
+			atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
+			len(drive.folderUnbatchSlice) == 0
+		drive.unBatchMux.Unlock()
 	}
 }
 

@@ -2,21 +2,34 @@ package main
 
 import (
 	"fmt"
-	"godrive/internal/drive"
+	// "godrive/internal/drive"
+	"godrive/internal/watchers"
 	"time"
 )
 
 func main() {
-	begin := time.Now()
-	gclient := godrive.NewClient()
-	sd := gclient.ListAll("dfg", "root")
-	select {
-	case r := <-sd:
-		r1, r2 := r.Folders, r.Files
-		fmt.Printf("folders: %d files: %d\n", r1, r2)
+	// begin1 := time.Now()
+	// gclient := godrive.NewClient("./dfg")
+	// sd := gclient.ListAll("root")
 
-		elapsed := time.Now().Sub(begin).Seconds()
-		fmt.Printf("time spent: %f s\n", elapsed)
+	// select {
+	// case r := <-sd:
+	// 	r1, r2 := r.Folders, r.Files
+	// 	fmt.Printf("folders: %d files: %d\n", r1, r2)
+
+	// 	elapsed1 := time.Now().Sub(begin1).Seconds()
+	// 	fmt.Printf("time spent: %f s\n", elapsed1)
+	// }
+
+	begin2 := time.Now()
+	fw1 := fw.NewWatcher("/media/kie/VM")
+	fw2 := fw1.ListAll()
+	select {
+	case r := <-fw2:
+		r1, r2, err := r.Folders, r.Files, r.Error
+		fmt.Printf("folders: %d files: %d error: %v\n", r1, r2, err)
 	}
+	elapsed2 := time.Now().Sub(begin2).Seconds()
+	fmt.Printf("time spent: %f s\n", elapsed2)
 
 }
