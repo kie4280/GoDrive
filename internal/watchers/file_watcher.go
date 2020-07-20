@@ -5,7 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"errors"
-	"fmt"
+	// "fmt"
 	"github.com/oleiade/lane"
 	"github.com/panjf2000/ants/v2"
 	"io"
@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	maxGoroutine    = 10
-	minGoroutine    = 2
-	minWaitingBatch = 4
+	maxGoroutine = 10
+	minGoroutine = 2
 )
 
 // FileWatcher indexes files
@@ -82,9 +81,6 @@ func (fw *FileWatcher) hashsum(path string, info os.FileInfo) *File {
 	filename := filepath.Base(path)
 	abspath := filepath.Join(fw.rootDir, path)
 	relpath := filepath.Clean(path)
-	_ = relpath
-
-	fmt.Printf("sddfsf: %s isdir: %v\n", abspath, info.IsDir())
 
 	if info.IsDir() {
 		h1 := md5.New()
