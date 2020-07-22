@@ -68,6 +68,11 @@ func (fw *FileWatcher) onError(err error) {
 
 }
 
+// Cancel the current operation
+func (fw *FileWatcher) Cancel() {
+	fw.canRun = false
+}
+
 // NewWatcher returns a new filewatcher object
 func NewWatcher(rootDir string) *FileWatcher {
 	ws := new(FileWatcher)
@@ -249,12 +254,11 @@ func (fw *FileWatcher) writeFiles(filename string, outchan chan *File) {
 	fw.onError(err2)
 	err3 := writer.Flush()
 	fw.onError(err3)
-
 	fw.writeWait.Done()
 
 }
 
-// Cancel the current operation
-func (fw *FileWatcher) Cancel() {
-	fw.canRun = false
+func (fw *FileWatcher) createFolderStructure() {
+	foldpath := filepath.Join(fw.rootDir, ".GoDrive", "local", "folders.json")
+	os.
 }
