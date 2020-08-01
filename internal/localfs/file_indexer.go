@@ -1,4 +1,4 @@
-package fw
+package localfs
 
 import (
 	"bufio"
@@ -260,5 +260,5 @@ func (fw *FileWatcher) writeFiles(filename string, outchan chan *File) {
 
 func (fw *FileWatcher) createFolderStructure() {
 	foldpath := filepath.Join(fw.rootDir, ".GoDrive", "local", "folders.json")
-	os.
+	_ = foldpath
 }

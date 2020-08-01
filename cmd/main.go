@@ -1,19 +1,46 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"godrive/internal/drive"
-	"godrive/internal/watchers"
+	"godrive/internal/googleclient"
+	"godrive/internal/localfs"
+	"log"
 	"time"
 )
 
+func handleGDriveError(err error) {
+	if err != nil {
+		if errors.Is(err, googleclient.ErrAuthWebCode) {
+
+		} else if errors.Is(err, googleclient.ErrCacheOauth) {
+
+		} else if errors.Is(err, googleclient.ErrParseError) {
+
+		} else if errors.Is(err, googleclient.ErrReadSecret) {
+
+		} else if errors.Is(err, googleclient.ErrUserAuthCodeError) {
+
+		} else {
+			log.Fatalf("Undefined error: %v", err)
+		}
+	}
+}
+
 func main() {
 	begin1 := time.Now()
-	gclient := godrive.NewClient("/home/kie/test")
+	gclient, err := drive.NewClient("/home/kie/test")
+	handleGDriveError(err)
+	if err != nil {
+		log.Fatalf("Undefined error: %v", err)
+
+	}
+
 	sd := gclient.ListAll("root")
 
 	begin2 := time.Now()
-	fw1 := fw.NewWatcher("/home/kie/test")
+	fw1 := localfs.NewWatcher("/home/kie/test")
 	fw2 := fw1.ListAll()
 
 	select {

@@ -1,4 +1,4 @@
-package godrive
+package drive
 
 import (
 	"bufio"
@@ -87,9 +87,11 @@ func makeBatch(ids []string, nextPage string) *foldBatch {
 }
 
 // NewClient a new googledrive client
-func NewClient(rootDir string) *DriveClient {
+func NewClient(rootDir string) (*DriveClient, error) {
 	client := new(DriveClient)
-	client.service = googleclient.NewService()
+	var err error
+	client.service, err = googleclient.NewService(0)
+
 	client.isRunning = false
 	client.canRun = false
 	client.onGoingRequests = 0
@@ -98,8 +100,11 @@ func NewClient(rootDir string) *DriveClient {
 	client.filecount = 0
 	client.foldcount = 0
 	client.rootDir = rootDir
+	if err != nil {
+		return nil, err
+	}
 
-	return client
+	return client, nil
 }
 
 // ListAll write a list of folders and files to "location". Returns Progress struct
