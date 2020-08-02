@@ -43,7 +43,8 @@ type DriveClient struct {
 	filecount          int32
 	foldcount          int32
 	progressChan       chan *Progress
-	rootDir            string
+	localRoot          string
+	remoteRootID       string
 	writeWait          sync.WaitGroup
 }
 
@@ -86,8 +87,8 @@ func makeBatch(ids []string, nextPage string) *foldBatch {
 	return root
 }
 
-// NewClient a new googledrive client
-func NewClient(rootDir string) (*DriveClient, error) {
+// NewClient a new googledrive client (localDirPath, remoteRootID)
+func NewClient(localDir string, remoteID string) (*DriveClient, error) {
 	client := new(DriveClient)
 	var err error
 	client.service, err = googleclient.NewService(0)
@@ -99,7 +100,8 @@ func NewClient(rootDir string) (*DriveClient, error) {
 	client.regRateLimit = regexp.MustCompile(userRateLimitExceed)
 	client.filecount = 0
 	client.foldcount = 0
-	client.rootDir = rootDir
+	client.localRoot = localDir
+	client.remoteRootID = remoteID
 	if err != nil {
 		return nil, err
 	}
@@ -108,14 +110,14 @@ func NewClient(rootDir string) (*DriveClient, error) {
 }
 
 // ListAll write a list of folders and files to "location". Returns Progress struct
-func (drive *DriveClient) ListAll(rootID string) chan *Progress {
+func (drive *DriveClient) ListAll() chan *Progress {
 
 	drive.progressChan = make(chan *Progress, 10)
-	go drive.listAll(rootID)
+	go drive.listAll()
 	return drive.progressChan
 }
 
-func (drive *DriveClient) listAll(rootID string) {
+func (drive *DriveClient) listAll() {
 
 	p, errP := ants.NewPoolWithFunc(maxGoroutine, drive.recursiveFoldSearch)
 	if errP != nil {
@@ -128,7 +130,7 @@ func (drive *DriveClient) listAll(rootID string) {
 	drive.foldersearchQueue = lane.NewQueue()
 	drive.folderUnbatchSlice = make([]string, 0, batchSize*10)
 	ll := make([]string, 0, 1)
-	ll = append(ll, "root")
+	ll = append(ll, drive.remoteRootID)
 
 	drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 	var foldChan chan []byte = make(chan []byte, 10000)
@@ -285,7 +287,7 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 }
 
 func (drive *DriveClient) writeFiles(filename string, outchan chan []byte) {
-	foldpath := filepath.Join(drive.rootDir, ".GoDrive", "remote")
+	foldpath := filepath.Join(drive.localRoot, ".GoDrive", "remote")
 	errMk := os.MkdirAll(foldpath, 0777)
 	drive.onError(errMk)
 	file, err := os.Create(filepath.Join(foldpath, filename))

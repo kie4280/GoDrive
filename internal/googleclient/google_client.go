@@ -14,6 +14,7 @@ import (
 	"strconv"
 )
 
+// Exported errors
 var (
 	//ErrReadSecret permission error or something
 	ErrReadSecret error = errors.New("Unable to read client secret file")
@@ -28,7 +29,7 @@ var (
 )
 
 var (
-	allErr []string = []string{}
+	userServices map[int]*drive.Service = make(map[int]*drive.Service)
 )
 
 // Retrieve a token, saves the token, then returns the generated client.fo
@@ -107,6 +108,11 @@ func saveToken(path string, token *oauth2.Token) error {
 // NewService creates a drive client
 func NewService(id int) (*drive.Service, error) {
 
+	cc, ok := userServices[id]
+	if ok {
+		return cc, nil
+	}
+
 	b, err := ioutil.ReadFile("./secrets/client_secret_1.json")
 	if err != nil {
 		return nil, newError(ErrReadSecret, err)
@@ -122,6 +128,9 @@ func NewService(id int) (*drive.Service, error) {
 		return nil, err
 	}
 	srv, err := drive.New(client)
+	if err != nil {
+		userServices[id] = srv
+	}
 
 	return srv, err
 }

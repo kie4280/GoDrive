@@ -6,6 +6,7 @@ import (
 	"godrive/internal/drive"
 	"godrive/internal/googleclient"
 	"godrive/internal/localfs"
+	"godrive/internal/watcher"
 	"log"
 	"time"
 )
@@ -28,20 +29,16 @@ func handleGDriveError(err error) {
 	}
 }
 
-func main() {
+func remoteSync() {
 	begin1 := time.Now()
-	gclient, err := drive.NewClient("/home/kie/test")
+	gclient, err := drive.NewClient("/home/kie/test", "root")
 	handleGDriveError(err)
 	if err != nil {
 		log.Fatalf("Undefined error: %v", err)
 
 	}
 
-	sd := gclient.ListAll("root")
-
-	begin2 := time.Now()
-	fw1 := localfs.NewWatcher("/home/kie/test")
-	fw2 := fw1.ListAll()
+	sd := gclient.ListAll()
 
 	select {
 	case r := <-sd:
@@ -51,6 +48,12 @@ func main() {
 		elapsed1 := time.Now().Sub(begin1).Seconds()
 		fmt.Printf("time spent: %f s\n", elapsed1)
 	}
+}
+
+func localSync() {
+	begin2 := time.Now()
+	fw1 := localfs.NewWatcher("/home/kie/test")
+	fw2 := fw1.ListAll()
 
 	select {
 	case r := <-fw2:
@@ -60,4 +63,29 @@ func main() {
 	elapsed2 := time.Now().Sub(begin2).Seconds()
 	fmt.Printf("time spent: %f s\n", elapsed2)
 
+}
+
+func getChange(d *watcher.DriveWatcher) {
+	changes, e := d.GetChanges()
+	if e == nil {
+		for _, i := range changes {
+			fmt.Printf("change: %v %v %v\n", i.Time, i.File.Name, i.File.Id)
+		}
+	} else {
+		fmt.Printf("getchange error: %v\n", e)
+	}
+}
+
+func watchChanges() {
+	d, err := watcher.RegDriveWatcher(0)
+	if err == nil {
+		for {
+			go getChange(d)
+			time.Sleep(3 * time.Second)
+		}
+	}
+}
+
+func main() {
+	watchChanges()
 }
