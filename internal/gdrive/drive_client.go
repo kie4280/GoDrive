@@ -1,7 +1,7 @@
-package drive
+package gdrive
 
 import (
-	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/oleiade/lane"
@@ -61,7 +61,7 @@ type Progress struct {
 	Error   error
 }
 
-func (drive *DriveClient) onError(err error) {
+func (drive *DriveClient) checkErr(err error) {
 
 	if err != nil {
 		var newError *Progress = &Progress{
@@ -71,6 +71,7 @@ func (drive *DriveClient) onError(err error) {
 				"\n" + string(debug.Stack())),
 			Done: false}
 		drive.progressChan <- newError
+		panic(err)
 	}
 }
 
@@ -92,6 +93,9 @@ func NewClient(localDir string, remoteID string) (*DriveClient, error) {
 	client := new(DriveClient)
 	var err error
 	client.service, err = googleclient.NewService(0)
+	if err != nil {
+		return nil, err
+	}
 
 	client.isRunning = false
 	client.canRun = false
@@ -102,9 +106,6 @@ func NewClient(localDir string, remoteID string) (*DriveClient, error) {
 	client.foldcount = 0
 	client.localRoot = localDir
 	client.remoteRootID = remoteID
-	if err != nil {
-		return nil, err
-	}
 
 	return client, nil
 }
@@ -121,9 +122,10 @@ func (drive *DriveClient) listAll() {
 
 	p, errP := ants.NewPoolWithFunc(maxGoroutine, drive.recursiveFoldSearch)
 	if errP != nil {
-		log.Fatalf("There is a problem starting goroutines: %v", errP)
+		log.Fatalf("There is a problem starting goroutine pool: %v", errP)
 	}
 	defer p.Release()
+	defer onError()
 	drive.onGoingRequests = 0
 	drive.canRun = true
 	drive.isRunning = true
@@ -133,16 +135,15 @@ func (drive *DriveClient) listAll() {
 	ll = append(ll, drive.remoteRootID)
 
 	drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
-	var foldChan chan []byte = make(chan []byte, 10000)
-	var fileChan chan []byte = make(chan []byte, 10000)
+	var foldChan chan [2]interface{} = make(chan [2]interface{}, 10000)
+	var fileChan chan [2]interface{} = make(chan [2]interface{}, 10000)
 
 	drive.filecount, drive.foldcount = 0, 0
 	var workDone bool = false
-
-	go drive.writeFiles("folders.json", foldChan)
-	go drive.writeFiles("files.json", fileChan)
 	drive.writeWait.Add(2)
 
+	go drive.writeFolds("folders.json", foldChan)
+	go drive.writeFiles("files.json", fileChan)
 	go drive.ShowProgress()
 
 	for !workDone && drive.canRun {
@@ -161,7 +162,7 @@ func (drive *DriveClient) listAll() {
 				}
 				drive.unBatchMux.Unlock()
 
-				drive.onError(p.Invoke([3]interface{}{foldChan, fileChan,
+				drive.checkErr(p.Invoke([3]interface{}{foldChan, fileChan,
 					drive.foldersearchQueue.Dequeue()}))
 			}
 
@@ -178,7 +179,7 @@ func (drive *DriveClient) listAll() {
 				drive.folderUnbatchSlice = make([]string, 0, 10*batchSize)
 			}
 			drive.unBatchMux.Unlock()
-			drive.onError(p.Invoke([3]interface{}{foldChan, fileChan,
+			drive.checkErr(p.Invoke([3]interface{}{foldChan, fileChan,
 				drive.foldersearchQueue.Dequeue()}))
 			time.Sleep(100 * time.Millisecond) // sleep longer
 		}
@@ -207,8 +208,8 @@ func (drive *DriveClient) listAll() {
 
 func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 	unpackArgs := args.([3]interface{})
-	writeFold := unpackArgs[0].(chan []byte)
-	writeFile := unpackArgs[1].(chan []byte)
+	writeFold := unpackArgs[0].(chan [2]interface{})
+	writeFile := unpackArgs[1].(chan [2]interface{})
 	_ = writeFile
 	_ = writeFold
 	batch, ok := unpackArgs[2].(*foldBatch)
@@ -216,6 +217,7 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 		atomic.AddInt32(&drive.onGoingRequests, -1)
 		return
 	}
+	defer onError()
 	// fmt.Printf("recursiveFold\n")
 
 	var str strings.Builder
@@ -245,7 +247,7 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 			fmt.Printf("rate limit: %v\n", err)
 			return
 		}
-		log.Fatalf("google api unexpected error: %v\n", err)
+		drive.checkErr(err)
 
 	}
 
@@ -258,15 +260,13 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 	for _, file := range r.Files {
 		if file.MimeType == "application/vnd.google-apps.folder" {
 			ll = append(ll, file.Id)
-			tt, err := file.MarshalJSON()
-			drive.onError(err)
-			writeFold <- tt
+
+			writeFold <- [2]interface{}{file.Id, convert(file)}
 			// fmt.Printf("folder: %s \n", string(tt)) // print out folder json
 			atomic.AddInt32(&drive.foldcount, 1)
 		} else {
-			tt, err := file.MarshalJSON()
-			drive.onError(err)
-			writeFile <- tt
+
+			writeFile <- [2]interface{}{file.Id, convert(file)}
 			atomic.AddInt32(&drive.filecount, 1)
 		}
 
@@ -286,39 +286,80 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 
 }
 
-func (drive *DriveClient) writeFiles(filename string, outchan chan []byte) {
+type fileHolder struct {
+	id       string
+	name     string
+	mimeType string
+	modTime  string
+	parents  []string
+	md5Chk   string
+}
+
+func convert(file *drive.File) *fileHolder {
+	aa := new(fileHolder)
+	aa.id = file.Id
+	aa.name = file.Name
+	aa.mimeType = file.MimeType
+	aa.modTime = file.ModifiedTime
+	aa.parents = file.Parents
+	aa.md5Chk = file.Md5Checksum
+	return aa
+}
+
+func (drive *DriveClient) writeFiles(filename string, outchan chan [2]interface{}) {
 	foldpath := filepath.Join(drive.localRoot, ".GoDrive", "remote")
 	errMk := os.MkdirAll(foldpath, 0777)
-	drive.onError(errMk)
+	drive.checkErr(errMk)
 	file, err := os.Create(filepath.Join(foldpath, filename))
-	drive.onError(err)
-	writer := bufio.NewWriter(file)
+	drive.checkErr(err)
+
 	defer file.Close()
 
-	_, err1 := writer.WriteString("[")
-	drive.onError(err1)
-	var i []byte
+	idMap := make(map[string]map[string]interface{})
+
+	var i [2]interface{}
 	var ok bool = true
 	i, ok = <-outchan
 	for drive.canRun && ok {
-
-		for _, a := range i {
-			err := writer.WriteByte(a)
-			drive.onError(err)
-		}
+		id, data := i[0].(string), i[1].(*fileHolder)
+		var mm = map[string]interface{}{
+			"name": data.name, "mimeType": data.mimeType,
+			"modTime": data.modTime, "parents": data.parents, "md5Chk": data.md5Chk}
+		idMap[id] = mm
 		i, ok = <-outchan
-		if ok {
-			e, err := writer.WriteString(",\n")
-			_ = e
-			drive.onError(err)
-		}
 
 	}
+	err = json.NewEncoder(file).Encode(idMap)
+	drive.checkErr(err)
+	drive.writeWait.Done()
 
-	_, err2 := writer.WriteString("]")
-	drive.onError(err2)
-	err3 := writer.Flush()
-	drive.onError(err3)
+}
+
+func (drive *DriveClient) writeFolds(filename string, outchan chan [2]interface{}) {
+	foldpath := filepath.Join(drive.localRoot, ".GoDrive", "remote")
+	errMk := os.MkdirAll(foldpath, 0777)
+	drive.checkErr(errMk)
+	file, err := os.Create(filepath.Join(foldpath, filename))
+	drive.checkErr(err)
+
+	defer file.Close()
+	idMap := make(map[string]map[string]interface{})
+
+	var i [2]interface{}
+	var ok bool = true
+	i, ok = <-outchan
+	for drive.canRun && ok {
+		id, data := i[0].(string), i[1].(*fileHolder)
+
+		var mm = map[string]interface{}{
+			"name": data.name, "mimeType": data.mimeType,
+			"modTime": data.modTime, "parents": data.parents}
+		idMap[id] = mm
+		i, ok = <-outchan
+
+	}
+	err = json.NewEncoder(file).Encode(idMap)
+	drive.checkErr(err)
 	drive.writeWait.Done()
 
 }
@@ -341,5 +382,11 @@ func (drive *DriveClient) ShowProgress() {
 			atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
 			len(drive.folderUnbatchSlice) == 0
 		drive.unBatchMux.Unlock()
+	}
+}
+
+func onError() {
+	if err := recover(); err != nil {
+		log.Printf("DriveClient error: %v", err)
 	}
 }
