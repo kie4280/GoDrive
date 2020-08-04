@@ -35,6 +35,8 @@ type DriveClient struct {
 	foldersearchQueue  *lane.Queue
 	folderUnbatchSlice []string
 	unBatchMux         sync.Mutex
+	fileMapMux         sync.Mutex
+	foldMapMux         sync.Mutex
 	canRun             bool
 	isRunning          bool
 	onGoingRequests    int32
@@ -45,7 +47,8 @@ type DriveClient struct {
 	progressChan       chan *Progress
 	localRoot          string
 	remoteRootID       string
-	writeWait          sync.WaitGroup
+	driveFileMap       map[string]*fileHolder
+	driveFoldMap       map[string]*foldHolder
 }
 
 type foldBatch struct {
@@ -72,6 +75,12 @@ func (drive *DriveClient) checkErr(err error) {
 			Done: false}
 		drive.progressChan <- newError
 		panic(err)
+	}
+}
+
+func onError() {
+	if err := recover(); err != nil {
+		log.Printf("DriveClient error: %v", err)
 	}
 }
 
@@ -135,20 +144,16 @@ func (drive *DriveClient) listAll() {
 	ll = append(ll, drive.remoteRootID)
 
 	drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
-	var foldChan chan [2]interface{} = make(chan [2]interface{}, 10000)
-	var fileChan chan [2]interface{} = make(chan [2]interface{}, 10000)
 
 	drive.filecount, drive.foldcount = 0, 0
 	var workDone bool = false
-	drive.writeWait.Add(2)
+	drive.driveFileMap = make(map[string]*fileHolder)
+	drive.driveFoldMap = make(map[string]*foldHolder)
 
-	go drive.writeFolds("folders.json", foldChan)
-	go drive.writeFiles("files.json", fileChan)
 	go drive.ShowProgress()
+
 	defer func() {
-		close(fileChan)
-		close(foldChan)
-		drive.writeWait.Wait()
+
 		drive.progressChan <- &Progress{Files: int(drive.filecount),
 			Folders: int(drive.foldcount), Error: nil, Done: true}
 		close(drive.progressChan)
@@ -170,7 +175,7 @@ func (drive *DriveClient) listAll() {
 				}
 				drive.unBatchMux.Unlock()
 
-				drive.checkErr(p.Invoke([3]interface{}{foldChan, fileChan,
+				drive.checkErr(p.Invoke([1]interface{}{
 					drive.foldersearchQueue.Dequeue()}))
 			}
 
@@ -187,7 +192,7 @@ func (drive *DriveClient) listAll() {
 				drive.folderUnbatchSlice = make([]string, 0, 10*batchSize)
 			}
 			drive.unBatchMux.Unlock()
-			drive.checkErr(p.Invoke([3]interface{}{foldChan, fileChan,
+			drive.checkErr(p.Invoke([1]interface{}{
 				drive.foldersearchQueue.Dequeue()}))
 			time.Sleep(100 * time.Millisecond) // sleep longer
 		}
@@ -204,17 +209,16 @@ func (drive *DriveClient) listAll() {
 		drive.unBatchMux.Unlock()
 
 	}
+	drive.writeFolds("folders.json")
+	drive.writeFiles("files.json")
 	drive.isRunning = false
 
 }
 
 func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
-	unpackArgs := args.([3]interface{})
-	writeFold := unpackArgs[0].(chan [2]interface{})
-	writeFile := unpackArgs[1].(chan [2]interface{})
-	_ = writeFile
-	_ = writeFold
-	batch, ok := unpackArgs[2].(*foldBatch)
+	unpackArgs := args.([1]interface{})
+
+	batch, ok := unpackArgs[0].(*foldBatch)
 	if !ok || len(batch.ids) == 0 {
 		atomic.AddInt32(&drive.onGoingRequests, -1)
 		return
@@ -260,17 +264,29 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 	ll := make([]string, 0, batchSize)
 
 	for _, file := range r.Files {
+
 		if file.MimeType == "application/vnd.google-apps.folder" {
 			ll = append(ll, file.Id)
-
-			writeFold <- [2]interface{}{file.Id, convFolStruct(file)}
+			drive.foldMapMux.Lock()
+			drive.driveFoldMap[file.Id] = convFolStruct(file)
+			drive.foldMapMux.Unlock()
 			// fmt.Printf("folder: %s \n", string(tt)) // print out folder json
 			atomic.AddInt32(&drive.foldcount, 1)
 		} else {
-
-			writeFile <- [2]interface{}{file.Id, convFilStruct(file)}
+			drive.fileMapMux.Lock()
+			drive.driveFileMap[file.Id] = convFilStruct(file)
+			drive.fileMapMux.Unlock()
 			atomic.AddInt32(&drive.filecount, 1)
 		}
+
+		drive.foldMapMux.Lock()
+		for _, ff := range file.Parents {
+			par, ok := drive.driveFoldMap[ff]
+			if ok {
+				par.Children = append(par.Children, file.Id)
+			}
+		}
+		drive.foldMapMux.Unlock()
 
 		if len(ll) >= batchSize {
 			drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
@@ -323,7 +339,8 @@ func convFilStruct(file *drive.File) *fileHolder {
 	return aa
 }
 
-func (drive *DriveClient) writeFiles(filename string, outchan chan [2]interface{}) {
+func (drive *DriveClient) writeFiles(filename string) {
+	defer onError()
 	foldpath := filepath.Join(drive.localRoot, ".GoDrive", "remote")
 	errMk := os.MkdirAll(foldpath, 0777)
 	drive.checkErr(errMk)
@@ -332,25 +349,13 @@ func (drive *DriveClient) writeFiles(filename string, outchan chan [2]interface{
 
 	defer file.Close()
 
-	idMap := make(map[string]*fileHolder)
-
-	var i [2]interface{}
-	var ok bool = true
-	i, ok = <-outchan
-	for drive.canRun && ok {
-		id, data := i[0].(string), i[1].(*fileHolder)
-
-		idMap[id] = data
-		i, ok = <-outchan
-
-	}
-	err = json.NewEncoder(file).Encode(idMap)
+	err = json.NewEncoder(file).Encode(drive.driveFileMap)
 	drive.checkErr(err)
-	drive.writeWait.Done()
 
 }
 
-func (drive *DriveClient) writeFolds(filename string, outchan chan [2]interface{}) {
+func (drive *DriveClient) writeFolds(filename string) {
+	defer onError()
 	foldpath := filepath.Join(drive.localRoot, ".GoDrive", "remote")
 	errMk := os.MkdirAll(foldpath, 0777)
 	drive.checkErr(errMk)
@@ -358,21 +363,9 @@ func (drive *DriveClient) writeFolds(filename string, outchan chan [2]interface{
 	drive.checkErr(err)
 
 	defer file.Close()
-	idMap := make(map[string]*foldHolder)
 
-	var i [2]interface{}
-	var ok bool = true
-	i, ok = <-outchan
-	for drive.canRun && ok {
-		id, data := i[0].(string), i[1].(*foldHolder)
-
-		idMap[id] = data
-		i, ok = <-outchan
-
-	}
-	err = json.NewEncoder(file).Encode(idMap)
+	err = json.NewEncoder(file).Encode(drive.driveFoldMap)
 	drive.checkErr(err)
-	drive.writeWait.Done()
 
 }
 
@@ -394,11 +387,5 @@ func (drive *DriveClient) ShowProgress() {
 			atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
 			len(drive.folderUnbatchSlice) == 0
 		drive.unBatchMux.Unlock()
-	}
-}
-
-func onError() {
-	if err := recover(); err != nil {
-		log.Printf("DriveClient error: %v", err)
 	}
 }
