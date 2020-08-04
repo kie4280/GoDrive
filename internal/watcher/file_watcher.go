@@ -1,1 +1,5 @@
 package watcher
+
+func RegfsWwatcher() {
+
+}

@@ -145,6 +145,14 @@ func (drive *DriveClient) listAll() {
 	go drive.writeFolds("folders.json", foldChan)
 	go drive.writeFiles("files.json", fileChan)
 	go drive.ShowProgress()
+	defer func() {
+		close(fileChan)
+		close(foldChan)
+		drive.writeWait.Wait()
+		drive.progressChan <- &Progress{Files: int(drive.filecount),
+			Folders: int(drive.foldcount), Error: nil, Done: true}
+		close(drive.progressChan)
+	}()
 
 	for !workDone && drive.canRun {
 
@@ -197,12 +205,6 @@ func (drive *DriveClient) listAll() {
 
 	}
 	drive.isRunning = false
-	close(fileChan)
-	close(foldChan)
-	drive.writeWait.Wait()
-	drive.progressChan <- &Progress{Files: int(drive.filecount),
-		Folders: int(drive.foldcount), Error: nil, Done: true}
-	close(drive.progressChan)
 
 }
 
@@ -261,12 +263,12 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 		if file.MimeType == "application/vnd.google-apps.folder" {
 			ll = append(ll, file.Id)
 
-			writeFold <- [2]interface{}{file.Id, convert(file)}
+			writeFold <- [2]interface{}{file.Id, convFolStruct(file)}
 			// fmt.Printf("folder: %s \n", string(tt)) // print out folder json
 			atomic.AddInt32(&drive.foldcount, 1)
 		} else {
 
-			writeFile <- [2]interface{}{file.Id, convert(file)}
+			writeFile <- [2]interface{}{file.Id, convFilStruct(file)}
 			atomic.AddInt32(&drive.filecount, 1)
 		}
 
@@ -287,22 +289,37 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 }
 
 type fileHolder struct {
-	id       string
-	name     string
-	mimeType string
-	modTime  string
-	parents  []string
-	md5Chk   string
+	Name     string
+	MimeType string
+	ModTime  string
+	Parents  []string
+	Md5Chk   string
 }
 
-func convert(file *drive.File) *fileHolder {
+type foldHolder struct {
+	Name     string
+	MimeType string
+	ModTime  string
+	Parents  []string
+	Children []string
+}
+
+func convFolStruct(file *drive.File) *foldHolder {
+	aa := new(foldHolder)
+	aa.Name = file.Name
+	aa.MimeType = file.MimeType
+	aa.ModTime = file.ModifiedTime
+	aa.Parents = file.Parents
+	return aa
+}
+
+func convFilStruct(file *drive.File) *fileHolder {
 	aa := new(fileHolder)
-	aa.id = file.Id
-	aa.name = file.Name
-	aa.mimeType = file.MimeType
-	aa.modTime = file.ModifiedTime
-	aa.parents = file.Parents
-	aa.md5Chk = file.Md5Checksum
+	aa.Name = file.Name
+	aa.MimeType = file.MimeType
+	aa.ModTime = file.ModifiedTime
+	aa.Parents = file.Parents
+	aa.Md5Chk = file.Md5Checksum
 	return aa
 }
 
@@ -315,17 +332,15 @@ func (drive *DriveClient) writeFiles(filename string, outchan chan [2]interface{
 
 	defer file.Close()
 
-	idMap := make(map[string]map[string]interface{})
+	idMap := make(map[string]*fileHolder)
 
 	var i [2]interface{}
 	var ok bool = true
 	i, ok = <-outchan
 	for drive.canRun && ok {
 		id, data := i[0].(string), i[1].(*fileHolder)
-		var mm = map[string]interface{}{
-			"name": data.name, "mimeType": data.mimeType,
-			"modTime": data.modTime, "parents": data.parents, "md5Chk": data.md5Chk}
-		idMap[id] = mm
+
+		idMap[id] = data
 		i, ok = <-outchan
 
 	}
@@ -343,18 +358,15 @@ func (drive *DriveClient) writeFolds(filename string, outchan chan [2]interface{
 	drive.checkErr(err)
 
 	defer file.Close()
-	idMap := make(map[string]map[string]interface{})
+	idMap := make(map[string]*foldHolder)
 
 	var i [2]interface{}
 	var ok bool = true
 	i, ok = <-outchan
 	for drive.canRun && ok {
-		id, data := i[0].(string), i[1].(*fileHolder)
+		id, data := i[0].(string), i[1].(*foldHolder)
 
-		var mm = map[string]interface{}{
-			"name": data.name, "mimeType": data.mimeType,
-			"modTime": data.modTime, "parents": data.parents}
-		idMap[id] = mm
+		idMap[id] = data
 		i, ok = <-outchan
 
 	}

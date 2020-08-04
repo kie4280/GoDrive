@@ -37,8 +37,8 @@ func RegDriveWatcher(id int) (*DriveWatcher, error) {
 	return dd, nil
 }
 
-// GetChanges gets changes since the last call to GetChanges or StartWatch
-func (dw *DriveWatcher) GetChanges() ([]*drive.Change, error) {
+// GetDriveChanges gets changes since the last call to GetChanges or StartWatch
+func (dw *DriveWatcher) GetDriveChanges() ([]*drive.Change, error) {
 
 	var changeList []*drive.Change = make([]*drive.Change, 0, 1000)
 	response, err := dw.service.Changes.List(dw.lastStartPageToken).PageSize(1000).Spaces("drive").

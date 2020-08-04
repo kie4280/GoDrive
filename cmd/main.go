@@ -66,12 +66,11 @@ func localSync() {
 }
 
 func getChange(d *watcher.DriveWatcher) {
-	changes, e := d.GetChanges()
-	defer func() { recover() }()
-	panic(1)
+	changes, e := d.GetDriveChanges()
+
 	if e == nil {
 		for _, i := range changes {
-			fmt.Printf("change: %v %v %v\n", i.Time, i.File.Name, i.File.Id)
+			fmt.Printf("change: %v %v %v %v\n", i.Time, i.File.Name, i.File.Id, i.File.Parents)
 		}
 	} else {
 		fmt.Printf("getchange error: %v\n", e)
