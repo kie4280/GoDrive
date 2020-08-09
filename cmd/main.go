@@ -40,6 +40,9 @@ func remoteSync() {
 
 	sd := gclient.ListAll()
 
+	time.Sleep(4 * time.Second)
+	sd <- &gdrive.ListProgress{Command: gdrive.C_CANCEL}
+
 	select {
 	case r := <-sd:
 		r1, r2 := r.Folders, r.Files
@@ -52,7 +55,7 @@ func remoteSync() {
 
 func localSync() {
 	begin2 := time.Now()
-	fw1 := localfs.NewWatcher("/home/kie/test")
+	fw1 := localfs.NewClient("/home/kie/test")
 	fw2 := fw1.ListAll()
 
 	select {
@@ -88,7 +91,41 @@ func watchChanges() {
 	}
 }
 
+func download() {
+	a, err := gdrive.NewClient("/home/kie/test", "root")
+	_ = err
+	ch := a.Download("1Qx2tb7_HbxeLEHvmG0ECvbmrRz0-ky9d", "/")
+loop:
+	for {
+		select {
+		case r := <-ch:
+			if r == nil {
+				break
+			}
+			if r.Err != nil {
+				fmt.Printf("error : %v\n", r.Err)
+			}
+			fmt.Printf("progress: %v\n", r.Percentage)
+			if r.Done {
+				break loop
+			}
+
+		}
+
+	}
+
+}
+
+func mkdir() {
+	a, err := gdrive.NewClient("/home/kie/test", "root")
+	_ = err
+	a.MkdirAll("/hello")
+	time.Sleep(10 * time.Second)
+}
+
 func main() {
 	// watchChanges()
 	remoteSync()
+	// download()
+	// mkdir()
 }

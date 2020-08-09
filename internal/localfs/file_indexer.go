@@ -24,8 +24,8 @@ const (
 	minGoroutine = 2
 )
 
-// FileWatcher indexes files
-type FileWatcher struct {
+// LocalClient indexes files
+type LocalClient struct {
 	progressChan    chan *Progress
 	rootDir         string
 	folderQueue     *lane.Queue
@@ -55,12 +55,12 @@ type Progress struct {
 	Done    bool
 }
 
-func (fw *FileWatcher) onError(err error) {
+func (fw *LocalClient) onError(err error) {
 	if err != nil {
 		var newError *Progress = &Progress{
 			Files:   -1,
 			Folders: -1,
-			Error: errors.New("FileWatcher error: " + err.Error() +
+			Error: errors.New("LocalClient error: " + err.Error() +
 				"\n" + string(debug.Stack())),
 			Done: false}
 		fw.progressChan <- newError
@@ -69,20 +69,20 @@ func (fw *FileWatcher) onError(err error) {
 }
 
 // Cancel the current operation
-func (fw *FileWatcher) Cancel() {
+func (fw *LocalClient) Cancel() {
 	fw.canRun = false
 }
 
-// NewWatcher returns a new filewatcher object
-func NewWatcher(rootDir string) *FileWatcher {
-	ws := new(FileWatcher)
+// NewClient returns a new LocalClient object
+func NewClient(rootDir string) *LocalClient {
+	ws := new(LocalClient)
 	ws.rootDir = rootDir
 	ws.canRun = false
 	return ws
 }
 
 // Hashsum returns the md5 hash of "file" with path relative to rootDir
-func (fw *FileWatcher) hashsum(path string, info os.FileInfo) *File {
+func (fw *LocalClient) hashsum(path string, info os.FileInfo) *File {
 	filename := filepath.Base(path)
 	abspath := filepath.Join(fw.rootDir, path)
 	relpath := filepath.Clean(path)
@@ -116,13 +116,13 @@ func (fw *FileWatcher) hashsum(path string, info os.FileInfo) *File {
 }
 
 // ListAll lists the folders and files below "location"
-func (fw *FileWatcher) ListAll() chan *Progress {
+func (fw *LocalClient) ListAll() chan *Progress {
 	fw.progressChan = make(chan *Progress, 10)
 	go fw.listAll()
 	return fw.progressChan
 }
 
-func (fw *FileWatcher) listAll() {
+func (fw *LocalClient) listAll() {
 	p, errP := ants.NewPoolWithFunc(maxGoroutine, fw.recursiveFoldsearch)
 	if errP != nil {
 		log.Fatalf("There is a problem starting goroutines: %v", errP)
@@ -185,7 +185,7 @@ func (fw *FileWatcher) listAll() {
 
 }
 
-func (fw *FileWatcher) recursiveFoldsearch(args interface{}) {
+func (fw *LocalClient) recursiveFoldsearch(args interface{}) {
 	unpackArgs := args.([3]interface{})
 	writeFold := unpackArgs[0].(chan *File)
 	writeFile := unpackArgs[1].(chan *File)
@@ -218,7 +218,7 @@ func (fw *FileWatcher) recursiveFoldsearch(args interface{}) {
 	atomic.AddInt32(&fw.onGoingRequests, -1)
 }
 
-func (fw *FileWatcher) writeFiles(filename string, outchan chan *File) {
+func (fw *LocalClient) writeFiles(filename string, outchan chan *File) {
 	foldpath := filepath.Join(fw.rootDir, ".GoDrive", "local")
 	errMk := os.MkdirAll(foldpath, 0777)
 	fw.onError(errMk)
@@ -258,7 +258,7 @@ func (fw *FileWatcher) writeFiles(filename string, outchan chan *File) {
 
 }
 
-func (fw *FileWatcher) createFolderStructure() {
+func (fw *LocalClient) createFolderStructure() {
 	foldpath := filepath.Join(fw.rootDir, ".GoDrive", "local", "folders.json")
 	_ = foldpath
 }

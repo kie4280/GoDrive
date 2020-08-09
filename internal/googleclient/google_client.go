@@ -32,7 +32,7 @@ var (
 	userServices map[int]*drive.Service = make(map[int]*drive.Service)
 )
 
-// Retrieve a token, saves the token, then returns the generated client.fo
+// Retrieve a token, saves the token, then returns the generated client.
 func getClient(id int, config *oauth2.Config) (*http.Client, error) {
 	// The file token.json stores the user's access and refresh tokens, and is
 	// created automatically when the authorization flow completes for the first
