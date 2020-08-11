@@ -1,7 +1,6 @@
 package gdrive
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/oleiade/lane"
@@ -36,21 +35,17 @@ type DriveClient struct {
 	foldersearchQueue  *lane.Queue
 	folderUnbatchSlice []string
 	unBatchMux         sync.Mutex
-	fileMapMux         sync.Mutex
-	foldMapMux         sync.Mutex
-	pathMapMux         sync.Mutex
-	canRunList         bool
-	isListRunning      bool
-	onGoingRequests    int32
-	requestInterv      int32
-	regRateLimit       *regexp.Regexp
-	filecount          int32
-	foldcount          int32
-	localRoot          string
-	remoteRootID       string
-	driveFileMap       map[string]*fileHolder
-	driveFoldMap       map[string]*foldHolder
-	pathMap            map[string]string
+
+	canRunList      bool
+	isListRunning   bool
+	onGoingRequests int32
+	requestInterv   int32
+	regRateLimit    *regexp.Regexp
+	filecount       int32
+	foldcount       int32
+	localRoot       string
+	remoteRootID    string
+	store           *GDStore
 }
 
 type foldBatch struct {
@@ -86,7 +81,7 @@ func makeBatch(ids []string, nextPage string) *foldBatch {
 }
 
 // NewClient a new googledrive client (localDirPath, remoteRootID)
-func NewClient(localDir string, remoteID string) (*DriveClient, error) {
+func NewClient(localDir string, remoteID string, store *GDStore) (*DriveClient, error) {
 	client := new(DriveClient)
 	var err error
 	client.service, err = googleclient.NewService(0)
@@ -102,6 +97,7 @@ func NewClient(localDir string, remoteID string) (*DriveClient, error) {
 	client.foldcount = 0
 	client.localRoot = localDir
 	client.remoteRootID = remoteID
+	client.store = store
 
 	return client, nil
 }
@@ -154,25 +150,33 @@ func (drive *DriveClient) ListAll() chan *ListProgress {
 		return nil
 	}
 	progressChan := make(chan *ListProgress, 10)
-	go drive.listAll(progressChan)
+	ss := new(listStruct)
+	ss.progressChan = progressChan
+	ss.drive = drive
+	go ss.listAll()
 	return progressChan
 }
 
-func (drive *DriveClient) listAll(progressChan chan *ListProgress) {
+type listStruct struct {
+	drive        *DriveClient
+	storeID      int
+	progressChan chan *ListProgress
+}
 
-	p, errP := ants.NewPoolWithFunc(maxGoroutine, drive.recursiveFoldSearch)
+func (ls *listStruct) listAll() {
+	drive := ls.drive
+	p, errP := ants.NewPoolWithFunc(maxGoroutine, ls.recursiveFoldSearch)
 	if errP != nil {
 		log.Fatalf("There is a problem starting goroutine pool: %v", errP)
 	}
-	defer close(progressChan)
+	defer close(ls.progressChan)
 	defer p.Release()
-	defer onListError(progressChan)
+	defer onListError(ls.progressChan)
 	drive.onGoingRequests = 0
 	drive.canRunList = true
 	drive.isListRunning = true
 	drive.foldersearchQueue = lane.NewQueue()
 	drive.folderUnbatchSlice = make([]string, 0, batchSize)
-	drive.pathMap = make(map[string]string, 10000)
 	ll := make([]string, 0, 1)
 	ll = append(ll, drive.remoteRootID)
 
@@ -180,13 +184,11 @@ func (drive *DriveClient) listAll(progressChan chan *ListProgress) {
 
 	drive.filecount, drive.foldcount = 0, 0
 	var workDone bool = false
-	drive.driveFileMap = make(map[string]*fileHolder)
-	drive.driveFoldMap = make(map[string]*foldHolder)
 
 	go drive.ShowListProgress()
 
 	for !workDone {
-		if a := getCommands(progressChan); a > 0 {
+		if a := getCommands(ls.progressChan); a > 0 {
 			if a == C_CANCEL {
 				drive.canRunList = false
 				return
@@ -206,8 +208,8 @@ func (drive *DriveClient) listAll(progressChan chan *ListProgress) {
 				}
 				drive.unBatchMux.Unlock()
 
-				checkErr(p.Invoke([2]interface{}{
-					drive.foldersearchQueue.Dequeue(), progressChan}))
+				checkErr(p.Invoke([1]interface{}{
+					drive.foldersearchQueue.Dequeue()}))
 			}
 
 		} else if !largeQueue && maxGoroutine-p.Free() <= minGoroutine {
@@ -223,8 +225,8 @@ func (drive *DriveClient) listAll(progressChan chan *ListProgress) {
 				drive.folderUnbatchSlice = make([]string, 0, batchSize)
 			}
 			drive.unBatchMux.Unlock()
-			checkErr(p.Invoke([2]interface{}{
-				drive.foldersearchQueue.Dequeue(), progressChan}))
+			checkErr(p.Invoke([1]interface{}{
+				drive.foldersearchQueue.Dequeue()}))
 			time.Sleep(100 * time.Millisecond) // sleep longer
 		}
 		if atomic.LoadInt32(&drive.requestInterv) > 0 {
@@ -240,23 +242,23 @@ func (drive *DriveClient) listAll(progressChan chan *ListProgress) {
 		drive.unBatchMux.Unlock()
 
 	}
-	drive.writeFolds("folders.json", "foldIDmap.json", progressChan)
-	drive.writeFiles("files.json", progressChan)
+
 	drive.isListRunning = false
-	progressChan <- &ListProgress{Files: int(drive.filecount),
+	ls.progressChan <- &ListProgress{Files: int(drive.filecount),
 		Folders: int(drive.foldcount), Error: nil, Done: drive.canRunList}
 
 }
 
-func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
-	unpackArgs := args.([2]interface{})
-	progressChan := unpackArgs[1].(chan *ListProgress)
+func (ls *listStruct) recursiveFoldSearch(args interface{}) {
+	drive := ls.drive
+	unpackArgs := args.([1]interface{})
+
 	batch, ok := unpackArgs[0].(*foldBatch)
 	if !ok || len(batch.ids) == 0 {
 		atomic.AddInt32(&drive.onGoingRequests, -1)
 		return
 	}
-	defer onListError(progressChan)
+	defer onListError(ls.progressChan)
 	// fmt.Printf("recursiveFold\n")
 
 	var str strings.Builder
@@ -298,35 +300,31 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 
 	var parentPath string
 	if len(r.Files) > 0 {
-		drive.foldMapMux.Lock()
-		fol, ok := drive.driveFoldMap[r.Files[0].Parents[0]]
-		if ok {
-			parentPath = filepath.Join(fol.Dir, fol.Name)
-		} else {
+		fol, err := drive.store.AccessFold(r.Files[0].Parents[0], true)
+		if err == ErrNotFound {
 			parentPath = "/"
-			drive.pathMapMux.Lock()
-			drive.pathMap["/"] = r.Files[0].Parents[0]
-			drive.pathMapMux.Unlock()
+			drive.store.AccessIDMap("/", true, &r.Files[0].Parents[0])
+
+		} else {
+			parentPath = filepath.Join(fol.Dir, fol.Name)
 		}
 
-		drive.foldMapMux.Unlock()
 	}
 
 	for _, file := range r.Files {
 
 		if file.MimeType == "application/vnd.google-apps.folder" {
 			ll = append(ll, file.Id)
-			drive.foldMapMux.Lock()
-			drive.driveFoldMap[file.Id] = convFolStruct(file, parentPath)
-			drive.foldMapMux.Unlock()
-			drive.pathMapMux.Lock()
-			drive.pathMap[filepath.Join(parentPath, file.Name)] = file.Id
-			drive.pathMapMux.Unlock()
+			fold, _ := drive.store.AccessFold(file.Id, false)
+			*fold = *convFolStruct(file, parentPath)
+			err := drive.store.AccessIDMap(filepath.Join(parentPath,
+				file.Name), true, &file.Id)
+			_ = err
 			atomic.AddInt32(&drive.foldcount, 1)
 		} else {
-			drive.fileMapMux.Lock()
-			drive.driveFileMap[file.Id] = convFilStruct(file, parentPath)
-			drive.fileMapMux.Unlock()
+
+			ff, _ := drive.store.AccessFile(file.Id, false)
+			*ff = *convFilStruct(file, parentPath)
 			atomic.AddInt32(&drive.filecount, 1)
 		}
 
@@ -346,7 +344,8 @@ func (drive *DriveClient) recursiveFoldSearch(args interface{}) {
 
 }
 
-type fileHolder struct {
+// FileHolder holds a file
+type FileHolder struct {
 	Name     string
 	MimeType string
 	ModTime  string
@@ -355,7 +354,8 @@ type fileHolder struct {
 	Dir      string
 }
 
-type foldHolder struct {
+// FoldHolder holds a folder
+type FoldHolder struct {
 	Name     string
 	MimeType string
 	ModTime  string
@@ -363,8 +363,8 @@ type foldHolder struct {
 	Dir      string
 }
 
-func convFolStruct(file *googledrive.File, path string) *foldHolder {
-	aa := new(foldHolder)
+func convFolStruct(file *googledrive.File, path string) *FoldHolder {
+	aa := new(FoldHolder)
 	aa.Name = file.Name
 	aa.MimeType = file.MimeType
 	aa.ModTime = file.ModifiedTime
@@ -373,8 +373,8 @@ func convFolStruct(file *googledrive.File, path string) *foldHolder {
 	return aa
 }
 
-func convFilStruct(file *googledrive.File, path string) *fileHolder {
-	aa := new(fileHolder)
+func convFilStruct(file *googledrive.File, path string) *FileHolder {
+	aa := new(FileHolder)
 	aa.Name = file.Name
 	aa.MimeType = file.MimeType
 	aa.ModTime = file.ModifiedTime
@@ -382,43 +382,6 @@ func convFilStruct(file *googledrive.File, path string) *fileHolder {
 	aa.Md5Chk = file.Md5Checksum
 	aa.Dir = path
 	return aa
-}
-
-func (drive *DriveClient) writeFiles(filename string, progressChan chan *ListProgress) {
-	defer onListError(progressChan)
-	foldpath := filepath.Join(drive.localRoot, ".GoDrive", "remote")
-	errMk := os.MkdirAll(foldpath, 0777)
-	checkErr(errMk)
-
-	file, err := os.Create(filepath.Join(foldpath, filename))
-	checkErr(err)
-	defer file.Close()
-	err = json.NewEncoder(file).Encode(drive.driveFileMap)
-	checkErr(err)
-
-}
-
-func (drive *DriveClient) writeFolds(foldList string, foldIDmap string, progressChan chan *ListProgress) {
-	defer onListError(progressChan)
-	foldpath := filepath.Join(drive.localRoot, ".GoDrive", "remote")
-	errMk := os.MkdirAll(foldpath, 0777)
-	checkErr(errMk)
-
-	list, err1 := os.Create(filepath.Join(foldpath, foldList))
-	checkErr(err1)
-	defer list.Close()
-	err1 = json.NewEncoder(list).Encode(drive.driveFoldMap)
-	checkErr(err1)
-
-	Ids, err2 := os.Create(filepath.Join(foldpath, foldIDmap))
-	checkErr(err2)
-	defer Ids.Close()
-	drive.pathMapMux.Lock()
-	err2 = json.NewEncoder(Ids).Encode(drive.pathMap)
-	drive.pathMapMux.Unlock()
-
-	checkErr(err2)
-
 }
 
 // ShowListProgress report current progress

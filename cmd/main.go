@@ -31,7 +31,7 @@ func handleGDriveError(err error) {
 
 func remoteSync() {
 	begin1 := time.Now()
-	gclient, err := gdrive.NewClient("/home/kie/test", "root")
+	gclient, err := gdrive.NewClient("/home/kie/test", "root", store)
 	handleGDriveError(err)
 	if err != nil {
 		log.Fatalf("Undefined error: %v", err)
@@ -40,8 +40,8 @@ func remoteSync() {
 
 	sd := gclient.ListAll()
 
-	time.Sleep(4 * time.Second)
-	sd <- &gdrive.ListProgress{Command: gdrive.C_CANCEL}
+	// time.Sleep(4 * time.Second)
+	// sd <- &gdrive.ListProgress{Command: gdrive.C_CANCEL}
 
 	select {
 	case r := <-sd:
@@ -92,7 +92,7 @@ func watchChanges() {
 }
 
 func download() {
-	a, err := gdrive.NewClient("/home/kie/test", "root")
+	a, err := gdrive.NewClient("/home/kie/test", "root", store)
 	_ = err
 	ch := a.Download("1Qx2tb7_HbxeLEHvmG0ECvbmrRz0-ky9d", "/")
 loop:
@@ -117,15 +117,31 @@ loop:
 }
 
 func mkdir() {
-	a, err := gdrive.NewClient("/home/kie/test", "root")
+	a, err := gdrive.NewClient("/home/kie/test", "root", store)
 	_ = err
 	a.MkdirAll("/hello")
 	time.Sleep(10 * time.Second)
 }
 
+var store *gdrive.GDStore
+
 func main() {
+	store = gdrive.NewStore("/home/kie/test", "root")
 	// watchChanges()
 	remoteSync()
 	// download()
 	// mkdir()
+
+	type person struct {
+		Name string
+		age  *int
+	}
+
+	age := 22
+	p := &person{"Bob", &age}
+	fmt.Printf("%v\n", *p)
+
+	p2 := new(person)
+	*p2 = *p
+	fmt.Printf("%v\n", *p2)
 }
