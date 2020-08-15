@@ -20,32 +20,33 @@ import (
 )
 
 const (
-	maxGoroutine        = 15
-	minGoroutine        = 2
-	batchSize           = 100
-	minWaitingBatch     = 4
-	userRateLimitExceed = "User Rate Limit Exceeded"
+	maxGoroutine    = 15
+	minGoroutine    = 2
+	batchSize       = 100
+	minWaitingBatch = 4
+
 	// C_CANCEL cancels the listAll operation
 	C_CANCEL int8 = 1
+	// S_ACK state command ACK
+	S_ACK int8 = -1
+	// S_TERM state terminated
+	S_TERM int8 = -2
+)
+
+var (
+	// ErrCancel is the error thrown by the canceled operation
+	ErrCancel = errors.New("The operation is canceled")
 )
 
 // DriveClient represents a google drive client object
 type DriveClient struct {
-	service            *googledrive.Service
-	foldersearchQueue  *lane.Queue
-	folderUnbatchSlice []string
-	unBatchMux         sync.Mutex
-
-	canRunList      bool
-	isListRunning   bool
-	onGoingRequests int32
-	requestInterv   int32
-	regRateLimit    *regexp.Regexp
-	filecount       int32
-	foldcount       int32
-	localRoot       string
-	remoteRootID    string
-	store           *GDStore
+	service             *googledrive.Service
+	canRunList          bool
+	isListRunning       bool
+	localRoot           string
+	remoteRootID        string
+	store               *GDStore
+	userRateLimitExceed *regexp.Regexp
 }
 
 type foldBatch struct {
@@ -56,20 +57,6 @@ type foldBatch struct {
 func checkErr(err error) {
 	if err != nil {
 		panic(err)
-	}
-}
-
-func onListError(progressChan chan *ListProgress) {
-	if err := recover(); err != nil {
-		err1 := err.(error)
-		var newError *ListProgress = &ListProgress{
-			Files:   -1,
-			Folders: -1,
-			Error: errors.New("DriveClient list error: " + err1.Error() +
-				"\n" + string(debug.Stack())),
-			Done: false}
-		progressChan <- newError
-		log.Printf("DriveClient list error: %v", err1)
 	}
 }
 
@@ -90,16 +77,19 @@ func NewClient(localDir string, remoteID string, store *GDStore) (*DriveClient, 
 	}
 
 	client.isListRunning = false
-	client.onGoingRequests = 0
-	client.requestInterv = 20
-	client.regRateLimit = regexp.MustCompile(userRateLimitExceed)
-	client.filecount = 0
-	client.foldcount = 0
 	client.localRoot = localDir
 	client.remoteRootID = remoteID
 	client.store = store
-
+	client.userRateLimitExceed = regexp.MustCompile("User Rate Limit Exceeded")
 	return client, nil
+}
+
+func (ls *listStruct) onListError() {
+	if err := recover(); err != nil {
+		err1 := err.(error)
+		ls.errChan <- errors.New("DriveClient list error: " + err1.Error() +
+			"\n" + string(debug.Stack()))
+	}
 }
 
 // ListProgress of the command
@@ -107,60 +97,78 @@ type ListProgress struct {
 	Files   int
 	Folders int
 	Done    bool
-	Error   error
-	Command int8
-}
-
-func getCommands(bb interface{}) int8 {
-
-	switch v := bb.(type) {
-	case chan *ListProgress:
-		select {
-		case b := <-v:
-			return b.Command
-
-		default:
-			return 0
-		}
-	case chan *UDLProgress:
-		select {
-		case b := <-v:
-			return b.Command
-
-		default:
-			return 0
-		}
-	case chan *MkDirProgress:
-		select {
-		case b := <-v:
-			return b.Command
-
-		default:
-			return 0
-		}
-	default:
-		panic(errors.New("undefined type"))
-	}
-
 }
 
 // ListAll write a list of folders and files to "location". Returns ListProgress struct if not already running, else returns nil
-func (drive *DriveClient) ListAll() chan *ListProgress {
+func (drive *DriveClient) ListAll() *ListHdl {
 	if drive.isListRunning {
 		return nil
 	}
 	progressChan := make(chan *ListProgress, 10)
+	commandChan := make(chan int8)
+	errChan := make(chan error)
 	ss := new(listStruct)
 	ss.progressChan = progressChan
+	ss.commandChan = commandChan
+	ss.errChan = errChan
 	ss.drive = drive
+	result := new(ListHdl)
+	result.progressChan = progressChan
+	result.commandChan = commandChan
+	result.errChan = errChan
+	result.running = false
 	go ss.listAll()
-	return progressChan
+	return result
+}
+
+// ListHdl The handle to ListAll
+type ListHdl struct {
+	progressChan <-chan *ListProgress
+	errChan      <-chan error
+	commandChan  chan int8
+	running      bool
+}
+
+// Cancel sends command to ListAll. Returns ErrCancel if the operation is already canceled
+func (hd *ListHdl) Cancel() error {
+	select {
+	case hd.commandChan <- C_CANCEL:
+
+		a := <-hd.commandChan
+		switch a {
+		case S_TERM:
+			hd.commandChan <- S_TERM
+		case S_ACK:
+		}
+
+		return nil
+	default:
+		return ErrCancel
+	}
+}
+
+// Progress returns the channel for progress
+func (hd *ListHdl) Progress() <-chan *ListProgress {
+	return hd.progressChan
+}
+
+func (hd *ListHdl) Error() <-chan error {
+	return hd.errChan
 }
 
 type listStruct struct {
-	drive        *DriveClient
-	storeID      int
-	progressChan chan *ListProgress
+	drive              *DriveClient
+	storeID            [3]*AccessLock
+	progressChan       chan *ListProgress
+	commandChan        chan int8
+	errChan            chan error
+	foldersearchQueue  *lane.Queue
+	folderUnbatchSlice []string
+	unBatchMux         sync.Mutex
+	onGoingRequests    int32
+	requestInterv      int32
+	filecount          int32
+	foldcount          int32
 }
 
 func (ls *listStruct) listAll() {
@@ -169,83 +177,105 @@ func (ls *listStruct) listAll() {
 	if errP != nil {
 		log.Fatalf("There is a problem starting goroutine pool: %v", errP)
 	}
-	defer close(ls.progressChan)
+
 	defer p.Release()
-	defer onListError(ls.progressChan)
-	drive.onGoingRequests = 0
+	defer ls.onListError()
+	var err1, err2, err3 error
+	ls.storeID[0], err1 = ls.drive.store.Acquire(R_FILEMAP)
+	ls.storeID[1], err2 = ls.drive.store.Acquire(R_FOLDMAP)
+	ls.storeID[2], err3 = ls.drive.store.Acquire(R_PATHMAP)
+	checkErr(err1)
+	checkErr(err2)
+	checkErr(err3)
+	defer func() {
+		err1 = ls.drive.store.Release(ls.storeID[0])
+		err2 = ls.drive.store.Release(ls.storeID[1])
+		err3 = ls.drive.store.Release(ls.storeID[2])
+		checkErr(err1)
+		checkErr(err2)
+		checkErr(err3)
+		drive.isListRunning = false
+	}()
 	drive.canRunList = true
 	drive.isListRunning = true
-	drive.foldersearchQueue = lane.NewQueue()
-	drive.folderUnbatchSlice = make([]string, 0, batchSize)
+	ls.onGoingRequests = 0
+	ls.requestInterv = 20
+
+	ls.onGoingRequests = 0
+	ls.foldersearchQueue = lane.NewQueue()
+	ls.folderUnbatchSlice = make([]string, 0, batchSize)
 	ll := make([]string, 0, 1)
 	ll = append(ll, drive.remoteRootID)
 
-	drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
+	ls.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 
-	drive.filecount, drive.foldcount = 0, 0
+	ls.filecount, ls.foldcount = 0, 0
 	var workDone bool = false
+	go ls.getComd()
+	progTimer := time.Now()
 
-	go drive.ShowListProgress()
+	for !workDone && drive.canRunList {
 
-	for !workDone {
-		if a := getCommands(ls.progressChan); a > 0 {
-			if a == C_CANCEL {
-				drive.canRunList = false
-				return
-			}
-		}
-		largeQueue := drive.foldersearchQueue.Size() > minWaitingBatch
+		largeQueue := ls.foldersearchQueue.Size() > minWaitingBatch
 
 		if largeQueue {
 			for i := 0; i < maxGoroutine; i++ {
-				atomic.AddInt32(&drive.onGoingRequests, 1)
-				drive.unBatchMux.Lock()
-				if len(drive.folderUnbatchSlice) >= batchSize {
+				atomic.AddInt32(&ls.onGoingRequests, 1)
+				ls.unBatchMux.Lock()
+				if len(ls.folderUnbatchSlice) >= batchSize {
 
-					drive.foldersearchQueue.Enqueue(
-						makeBatch(drive.folderUnbatchSlice[:batchSize], ""))
-					drive.folderUnbatchSlice = drive.folderUnbatchSlice[batchSize:]
+					ls.foldersearchQueue.Enqueue(
+						makeBatch(ls.folderUnbatchSlice[:batchSize], ""))
+					ls.folderUnbatchSlice = ls.folderUnbatchSlice[batchSize:]
 				}
-				drive.unBatchMux.Unlock()
+				ls.unBatchMux.Unlock()
 
 				checkErr(p.Invoke([1]interface{}{
-					drive.foldersearchQueue.Dequeue()}))
+					ls.foldersearchQueue.Dequeue()}))
 			}
 
 		} else if !largeQueue && maxGoroutine-p.Free() <= minGoroutine {
-			atomic.AddInt32(&drive.onGoingRequests, 1)
-			drive.unBatchMux.Lock()
-			if len(drive.folderUnbatchSlice) >= batchSize {
+			atomic.AddInt32(&ls.onGoingRequests, 1)
+			ls.unBatchMux.Lock()
+			if len(ls.folderUnbatchSlice) >= batchSize {
 
-				drive.foldersearchQueue.Enqueue(
-					makeBatch(drive.folderUnbatchSlice[:batchSize], ""))
-				drive.folderUnbatchSlice = drive.folderUnbatchSlice[batchSize:]
-			} else if len(drive.folderUnbatchSlice) > 0 {
-				drive.foldersearchQueue.Enqueue(makeBatch(drive.folderUnbatchSlice, ""))
-				drive.folderUnbatchSlice = make([]string, 0, batchSize)
+				ls.foldersearchQueue.Enqueue(
+					makeBatch(ls.folderUnbatchSlice[:batchSize], ""))
+				ls.folderUnbatchSlice = ls.folderUnbatchSlice[batchSize:]
+			} else if len(ls.folderUnbatchSlice) > 0 {
+				ls.foldersearchQueue.Enqueue(makeBatch(ls.folderUnbatchSlice, ""))
+				ls.folderUnbatchSlice = make([]string, 0, batchSize)
 			}
-			drive.unBatchMux.Unlock()
+			ls.unBatchMux.Unlock()
 			checkErr(p.Invoke([1]interface{}{
-				drive.foldersearchQueue.Dequeue()}))
+				ls.foldersearchQueue.Dequeue()}))
 			time.Sleep(100 * time.Millisecond) // sleep longer
 		}
-		if atomic.LoadInt32(&drive.requestInterv) > 0 {
-			atomic.AddInt32(&drive.requestInterv, -10)
+		if atomic.LoadInt32(&ls.requestInterv) > 0 {
+			atomic.AddInt32(&ls.requestInterv, -10)
+		}
+		time.Sleep(time.Duration(atomic.LoadInt32(&ls.requestInterv)) *
+			time.Millisecond) // preventing exceed user rate limit
+
+		if time.Now().Sub(progTimer).Milliseconds() >= 1000 {
+			if len(ls.progressChan) >= 9 {
+				<-ls.progressChan
+			}
+			ls.progressChan <- &ListProgress{Files: int(atomic.LoadInt32(&ls.filecount)),
+				Folders: int(atomic.LoadInt32(&ls.foldcount)), Done: false}
+			progTimer = time.Now()
 		}
 
-		time.Sleep(time.Duration(atomic.LoadInt32(&drive.requestInterv)) *
-			time.Millisecond) // preventing exceed user rate limit
-		drive.unBatchMux.Lock()
-		workDone = drive.foldersearchQueue.Empty() &&
-			atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
-			len(drive.folderUnbatchSlice) == 0
-		drive.unBatchMux.Unlock()
+		ls.unBatchMux.Lock()
+		workDone = ls.foldersearchQueue.Empty() &&
+			atomic.LoadInt32(&ls.onGoingRequests) == 0 &&
+			len(ls.folderUnbatchSlice) == 0
+		ls.unBatchMux.Unlock()
 
 	}
 
-	drive.isListRunning = false
-	ls.progressChan <- &ListProgress{Files: int(drive.filecount),
-		Folders: int(drive.foldcount), Error: nil, Done: drive.canRunList}
+	ls.progressChan <- &ListProgress{Files: int(ls.filecount),
+		Folders: int(ls.foldcount), Done: drive.canRunList}
 
 }
 
@@ -255,10 +285,10 @@ func (ls *listStruct) recursiveFoldSearch(args interface{}) {
 
 	batch, ok := unpackArgs[0].(*foldBatch)
 	if !ok || len(batch.ids) == 0 {
-		atomic.AddInt32(&drive.onGoingRequests, -1)
+		atomic.AddInt32(&ls.onGoingRequests, -1)
 		return
 	}
-	defer onListError(ls.progressChan)
+	defer ls.onListError()
 	// fmt.Printf("recursiveFold\n")
 
 	var str strings.Builder
@@ -280,11 +310,11 @@ func (ls *listStruct) recursiveFoldSearch(args interface{}) {
 		Spaces("drive").Corpora("user").Do()
 	if err != nil {
 
-		match := drive.regRateLimit.FindString(err.Error())
+		match := drive.userRateLimitExceed.FindString(err.Error())
 		if match != "" {
-			drive.foldersearchQueue.Enqueue(batch)
-			atomic.AddInt32(&drive.requestInterv, 200)
-			atomic.AddInt32(&drive.onGoingRequests, -1)
+			ls.foldersearchQueue.Enqueue(batch)
+			atomic.AddInt32(&ls.requestInterv, 200)
+			atomic.AddInt32(&ls.onGoingRequests, -1)
 			fmt.Printf("rate limit: %v\n", err)
 			return
 		}
@@ -294,16 +324,16 @@ func (ls *listStruct) recursiveFoldSearch(args interface{}) {
 
 	if r.NextPageToken != "" {
 		batch.nextPageToken = r.NextPageToken
-		drive.foldersearchQueue.Enqueue(batch)
+		ls.foldersearchQueue.Enqueue(batch)
 	}
 	ll := make([]string, 0, batchSize)
 
 	var parentPath string
 	if len(r.Files) > 0 {
-		fol, err := drive.store.AccessFold(r.Files[0].Parents[0], true)
+		fol, err := ls.storeID[1].AccessFold(r.Files[0].Parents[0], true)
 		if err == ErrNotFound {
 			parentPath = "/"
-			drive.store.AccessIDMap("/", true, &r.Files[0].Parents[0])
+			ls.storeID[2].AccessIDMap("/", true, &r.Files[0].Parents[0])
 
 		} else {
 			parentPath = filepath.Join(fol.Dir, fol.Name)
@@ -315,32 +345,32 @@ func (ls *listStruct) recursiveFoldSearch(args interface{}) {
 
 		if file.MimeType == "application/vnd.google-apps.folder" {
 			ll = append(ll, file.Id)
-			fold, _ := drive.store.AccessFold(file.Id, false)
+			fold, _ := ls.storeID[1].AccessFold(file.Id, false)
 			*fold = *convFolStruct(file, parentPath)
-			err := drive.store.AccessIDMap(filepath.Join(parentPath,
+			err := ls.storeID[2].AccessIDMap(filepath.Join(parentPath,
 				file.Name), true, &file.Id)
 			_ = err
-			atomic.AddInt32(&drive.foldcount, 1)
+			atomic.AddInt32(&ls.foldcount, 1)
 		} else {
 
-			ff, _ := drive.store.AccessFile(file.Id, false)
+			ff, _ := ls.storeID[0].AccessFile(file.Id, false)
 			*ff = *convFilStruct(file, parentPath)
-			atomic.AddInt32(&drive.filecount, 1)
+			atomic.AddInt32(&ls.filecount, 1)
 		}
 
 		if len(ll) >= batchSize {
-			drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
+			ls.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 			ll = make([]string, 0, batchSize)
 		}
 	}
 	if len(ll) > 0 {
-		drive.unBatchMux.Lock()
-		drive.folderUnbatchSlice = append(drive.folderUnbatchSlice, ll...)
-		drive.unBatchMux.Unlock()
+		ls.unBatchMux.Lock()
+		ls.folderUnbatchSlice = append(ls.folderUnbatchSlice, ll...)
+		ls.unBatchMux.Unlock()
 		// drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 	}
 
-	atomic.AddInt32(&drive.onGoingRequests, -1)
+	atomic.AddInt32(&ls.onGoingRequests, -1)
 
 }
 
@@ -384,25 +414,20 @@ func convFilStruct(file *googledrive.File, path string) *FileHolder {
 	return aa
 }
 
-// ShowListProgress report current progress
-func (drive *DriveClient) ShowListProgress() {
-	drive.unBatchMux.Lock()
-	workDone := drive.foldersearchQueue.Empty() &&
-		atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
-		len(drive.folderUnbatchSlice) == 0
-	drive.unBatchMux.Unlock()
-	for !workDone && drive.canRunList {
-		fmt.Printf("request internal: %d files: %d folders: %d\n",
-			atomic.LoadInt32(&drive.requestInterv),
-			atomic.LoadInt32(&drive.filecount),
-			atomic.LoadInt32(&drive.foldcount))
-		time.Sleep(1 * time.Second)
-		drive.unBatchMux.Lock()
-		workDone = drive.foldersearchQueue.Empty() &&
-			atomic.LoadInt32(&drive.onGoingRequests) == 0 &&
-			len(drive.folderUnbatchSlice) == 0
-		drive.unBatchMux.Unlock()
+func (ls *listStruct) getComd() {
+	for ls.drive.canRunList {
+
+		b := <-ls.commandChan
+		switch b {
+		case C_CANCEL:
+			ls.drive.canRunList = false
+			ls.commandChan <- S_TERM
+		default:
+			ls.commandChan <- S_ACK // ACK
+		}
+
 	}
+
 }
 
 // UDLProgress represents the download progress
@@ -411,25 +436,31 @@ type UDLProgress struct {
 	Done       bool
 	Err        error
 	File       *googledrive.File
-	Command    int8
 }
 
 type writeCounter struct {
 	totalBytes int64
 	accu       int64
 	prog       chan *UDLProgress
+	now        time.Time
 }
 
 func (wc *writeCounter) Write(p []byte) (int, error) {
 	n := len(p)
 	wc.accu += int64(n)
-	if wc.totalBytes == 0 {
-		wc.prog <- &UDLProgress{Percentage: -1, Done: false, Err: nil, File: nil}
-	} else {
-		wc.prog <- &UDLProgress{Percentage: float32(wc.accu) / float32(wc.totalBytes) * 100,
-			Done: false, Err: nil, File: nil}
+
+	if time.Now().Sub(wc.now).Seconds() > 1 {
+		if wc.totalBytes == 0 {
+			wc.prog <- &UDLProgress{Percentage: -1, Done: false, Err: nil, File: nil}
+		} else {
+			wc.prog <- &UDLProgress{Percentage: float32(wc.accu) / float32(wc.totalBytes) * 100,
+				Done: false, Err: nil, File: nil}
+		}
+		wc.now = time.Now()
 	}
+
 	return n, nil
+
 }
 
 func onDLError(ch chan *UDLProgress) {
@@ -470,7 +501,10 @@ func (drive *DriveClient) download(fileID string, dest string, ch chan *UDLProgr
 	defer file.Close()
 	wc := &writeCounter{totalBytes: int64(info.Size), accu: 0, prog: ch}
 	_, errC := io.Copy(file, io.TeeReader(res.Body, wc))
-	checkErr(errC)
+	if errC != ErrCancel {
+		checkErr(errC)
+	}
+
 	ch <- &UDLProgress{Percentage: 100, Done: true, Err: nil, File: info}
 
 }
@@ -492,16 +526,18 @@ func (drive *DriveClient) upload(metadata *googledrive.File, path string, ch cha
 	wc := &writeCounter{totalBytes: stat.Size(), accu: 0, prog: ch}
 	file, err := drive.service.Files.Create(metadata).EnforceSingleParent(true).
 		Media(io.TeeReader(content, wc)).Do()
-	checkErr(err)
+	if err != ErrCancel {
+		checkErr(err)
+	}
+
 	ch <- &UDLProgress{Percentage: 100, Done: true, Err: nil, File: file}
 }
 
 // MkDirProgress represents the mkdir progress
 type MkDirProgress struct {
-	Done    bool
-	Err     error
-	File    *googledrive.File
-	Command int8
+	Done bool
+	Err  error
+	File *googledrive.File
 }
 
 func onMkdirError(ch chan *MkDirProgress) {

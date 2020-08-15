@@ -42,15 +42,28 @@ func remoteSync() {
 
 	// time.Sleep(4 * time.Second)
 	// sd <- &gdrive.ListProgress{Command: gdrive.C_CANCEL}
+loop:
+	for {
+		a := sd
+		select {
+		case r := <-a.Error():
+			fmt.Printf("error: %v\n", r)
+		default:
+		}
+		select {
+		case r := <-a.Progress():
+			r1, r2 := r.Folders, r.Files
+			fmt.Printf("folders: %d files: %d\n", r1, r2)
+			if r.Done {
+				break loop
+			}
 
-	select {
-	case r := <-sd:
-		r1, r2 := r.Folders, r.Files
-		fmt.Printf("folders: %d files: %d\n", r1, r2)
-
-		elapsed1 := time.Now().Sub(begin1).Seconds()
-		fmt.Printf("time spent: %f s\n", elapsed1)
+		}
 	}
+
+	elapsed1 := time.Now().Sub(begin1).Seconds()
+	fmt.Printf("time spent: %f s\n", elapsed1)
+
 }
 
 func localSync() {
@@ -95,6 +108,10 @@ func download() {
 	a, err := gdrive.NewClient("/home/kie/test", "root", store)
 	_ = err
 	ch := a.Download("1Qx2tb7_HbxeLEHvmG0ECvbmrRz0-ky9d", "/")
+
+	now := time.Now()
+	var fired = false
+
 loop:
 	for {
 		select {
@@ -104,12 +121,20 @@ loop:
 			}
 			if r.Err != nil {
 				fmt.Printf("error : %v\n", r.Err)
+				break loop
 			}
-			fmt.Printf("progress: %v\n", r.Percentage)
+
 			if r.Done {
 				break loop
 			}
 
+		}
+
+		if time.Now().Sub(now).Seconds() > 5 && !fired {
+			a := new(gdrive.UDLProgress)
+
+			ch <- a
+			fired = true
 		}
 
 	}
@@ -132,16 +157,4 @@ func main() {
 	// download()
 	// mkdir()
 
-	type person struct {
-		Name string
-		age  *int
-	}
-
-	age := 22
-	p := &person{"Bob", &age}
-	fmt.Printf("%v\n", *p)
-
-	p2 := new(person)
-	*p2 = *p
-	fmt.Printf("%v\n", *p2)
 }
