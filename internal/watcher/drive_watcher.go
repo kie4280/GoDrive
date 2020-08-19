@@ -19,7 +19,7 @@ type DriveWatcher struct {
 	service            *drive.Service
 }
 
-// RegDriveWatcher returns a new watcher for drive
+// RegDriveWatcher returns a new watcher for drive (id: userID)
 func RegDriveWatcher(id int) (*DriveWatcher, error) {
 	dd := new(DriveWatcher)
 	dd.userID = id

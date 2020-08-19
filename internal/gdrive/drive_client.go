@@ -6,6 +6,7 @@ import (
 	"github.com/oleiade/lane"
 	"github.com/panjf2000/ants/v2"
 	"godrive/internal/googleclient"
+	"godrive/internal/settings"
 	googledrive "google.golang.org/api/drive/v3"
 	"io"
 	"log"
@@ -20,7 +21,7 @@ import (
 )
 
 const (
-	maxGoroutine    = 15
+	maxGoroutine    = 20
 	minGoroutine    = 2
 	batchSize       = 100
 	minWaitingBatch = 4
@@ -44,7 +45,6 @@ type DriveClient struct {
 	canRunList          bool
 	isListRunning       bool
 	localRoot           string
-	remoteRootID        string
 	store               *GDStore
 	userRateLimitExceed *regexp.Regexp
 }
@@ -68,17 +68,24 @@ func makeBatch(ids []string, nextPage string) *foldBatch {
 }
 
 // NewClient a new googledrive client (localDirPath, remoteRootID)
-func NewClient(localDir string, remoteID string, store *GDStore) (*DriveClient, error) {
+func NewClient(id string) (*DriveClient, error) {
 	client := new(DriveClient)
 	var err error
-	client.service, err = googleclient.NewService(0)
+	client.service, err = googleclient.NewService(id)
 	if err != nil {
 		return nil, err
 	}
 
 	client.isListRunning = false
-	client.localRoot = localDir
-	client.remoteRootID = remoteID
+	set, err := settings.ReadDriveConfig()
+	if err != nil {
+		return nil, err
+	}
+	local, err := set.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	client.localRoot = local.LocalRoot
 	client.store = store
 	client.userRateLimitExceed = regexp.MustCompile("User Rate Limit Exceeded")
 	return client, nil
@@ -205,7 +212,7 @@ func (ls *listStruct) listAll() {
 	ls.foldersearchQueue = lane.NewQueue()
 	ls.folderUnbatchSlice = make([]string, 0, batchSize)
 	ll := make([]string, 0, 1)
-	ll = append(ll, drive.remoteRootID)
+	ll = append(ll, "root")
 
 	ls.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 
@@ -372,25 +379,6 @@ func (ls *listStruct) recursiveFoldSearch(args interface{}) {
 
 	atomic.AddInt32(&ls.onGoingRequests, -1)
 
-}
-
-// FileHolder holds a file
-type FileHolder struct {
-	Name     string
-	MimeType string
-	ModTime  string
-	Parents  []string
-	Md5Chk   string
-	Dir      string
-}
-
-// FoldHolder holds a folder
-type FoldHolder struct {
-	Name     string
-	MimeType string
-	ModTime  string
-	Parents  []string
-	Dir      string
 }
 
 func convFolStruct(file *googledrive.File, path string) *FoldHolder {

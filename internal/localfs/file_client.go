@@ -51,21 +51,13 @@ type File struct {
 type Progress struct {
 	Files   int
 	Folders int
-	Error   error
 	Done    bool
 }
 
-func (fw *LocalClient) onError(err error) {
+func checkErr(err error) {
 	if err != nil {
-		var newError *Progress = &Progress{
-			Files:   -1,
-			Folders: -1,
-			Error: errors.New("LocalClient error: " + err.Error() +
-				"\n" + string(debug.Stack())),
-			Done: false}
-		fw.progressChan <- newError
+		panic(err)
 	}
-
 }
 
 // Cancel the current operation
@@ -176,12 +168,9 @@ func (fw *LocalClient) listAll() {
 
 	}
 
-	close(foldChan)
-	close(fileChan)
 	fw.writeWait.Wait()
 	fw.progressChan <- &Progress{Files: int(fw.filecount), Folders: int(fw.foldcount),
 		Error: nil, Done: true}
-	close(fw.progressChan)
 
 }
 

@@ -98,7 +98,7 @@ func watchChanges() {
 
 	if err == nil {
 		for {
-			go getChange(d)
+			getChange(d)
 			time.Sleep(3 * time.Second)
 		}
 	}
@@ -152,7 +152,7 @@ var store *gdrive.GDStore
 
 func main() {
 	store = gdrive.NewStore("/home/kie/test", "root")
-	// watchChanges()
+	watchChanges()
 	remoteSync()
 	// download()
 	// mkdir()

@@ -11,7 +11,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"strconv"
 )
 
 // Exported errors
@@ -29,16 +28,16 @@ var (
 )
 
 var (
-	userServices map[int]*drive.Service = make(map[int]*drive.Service)
+	userServices map[string]*drive.Service = make(map[string]*drive.Service)
 )
 
 // Retrieve a token, saves the token, then returns the generated client.
-func getClient(id int, config *oauth2.Config) (*http.Client, error) {
+func getClient(id string, config *oauth2.Config) (*http.Client, error) {
 	// The file token.json stores the user's access and refresh tokens, and is
 	// created automatically when the authorization flow completes for the first
 	// time.
 
-	tokFile := "./secrets/token_" + strconv.Itoa(id) + ".json"
+	tokFile := "./secrets/token_" + id + ".json"
 	tok, err := tokenFromFile(tokFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -106,7 +105,7 @@ func saveToken(path string, token *oauth2.Token) error {
 }
 
 // NewService creates a drive client
-func NewService(id int) (*drive.Service, error) {
+func NewService(id string) (*drive.Service, error) {
 
 	cc, ok := userServices[id]
 	if ok {

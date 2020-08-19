@@ -1,9 +1,8 @@
-package gdrive
+package localfs
 
 import (
 	"encoding/json"
 	"errors"
-	"godrive/internal/settings"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +16,7 @@ type GDStore struct {
 	updateMux  sync.Mutex
 
 	localRoot    string
+	remoteRootID string
 	driveFileMap map[string]*FileHolder
 	driveFoldMap map[string]*FoldHolder
 	pathMap      map[string]string
@@ -44,26 +44,20 @@ const (
 
 var (
 	// ErrNotFound key not found error
-	ErrNotFound = errors.New("drive status map key not found")
+	ErrNotFound = errors.New("file status map key not found")
 	// ErrInUse the resource is being used
-	ErrInUse = errors.New("drive status resource is being used")
+	ErrInUse = errors.New("file status resource is being used")
 	// ErrAlRelease resource is already freed
 	ErrAlRelease = errors.New("resource is already released")
 	// ErrInvaID invalid id to unlock resource
 	ErrInvaID = errors.New("invalid id to unlock resource")
-
-	// drive states for different users
-
 )
-
-var gdstore *GDStore = nil
 
 // FileHolder holds a file
 type FileHolder struct {
 	Name     string
 	MimeType string
 	ModTime  string
-	Parents  []string
 	Md5Chk   string
 	Dir      string
 }
@@ -73,28 +67,20 @@ type FoldHolder struct {
 	Name     string
 	MimeType string
 	ModTime  string
-	Parents  []string
 	Dir      string
 }
 
 // NewStore new drive state storage
-func NewStore(id string) (*GDStore, error) {
-	set, err := settings.ReadDriveConfig()
-	if err != nil {
-		return nil, err
-	}
-	local, err := set.Get(id)
-	if err != nil {
-		return nil, err
-	}
+func NewStore(localDir string, remoteID string) *GDStore {
 	gs := new(GDStore)
-	gs.localRoot = local.LocalRoot
+	gs.localRoot = localDir
+	gs.remoteRootID = remoteID
 	gs.driveFileMap = make(map[string]*FileHolder, 10000)
 	gs.driveFoldMap = make(map[string]*FoldHolder, 10000)
 	gs.pathMap = make(map[string]string, 10000)
 	gs.id = 0
 	gs.updating = [3]int{-1, -1, -1}
-	return gs, nil
+	return gs
 }
 
 // AccessFile allows access to fileMap
@@ -274,7 +260,7 @@ func (gs *GDStore) getNewID() int {
 
 func (gs *GDStore) writeFiles(filename string) {
 
-	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "remote")
+	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "local")
 	errMk := os.MkdirAll(foldpath, 0777)
 	checkErr(errMk)
 
@@ -288,7 +274,7 @@ func (gs *GDStore) writeFiles(filename string) {
 
 func (gs *GDStore) writeFolds(foldList string, foldIDmap string) {
 
-	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "remote")
+	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "local")
 	errMk := os.MkdirAll(foldpath, 0777)
 	checkErr(errMk)
 
