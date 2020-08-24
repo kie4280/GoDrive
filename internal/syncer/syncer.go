@@ -26,3 +26,8 @@ func NewSyncer() *SyncST {
 func (sy *SyncST) Start() error {
 	return nil
 }
+
+func (sy *SyncST) initialCheck() error {
+
+	return nil
+}

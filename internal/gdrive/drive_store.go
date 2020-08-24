@@ -11,36 +11,45 @@ import (
 
 // GDStore is the struct to store state
 type GDStore struct {
-	fileMapMux sync.Mutex
-	foldMapMux sync.Mutex
-	pathMapMux sync.Mutex
-	updateMux  sync.Mutex
-
+	accessMux    sync.Mutex
+	accessID     int
+	accessCond   *sync.Cond
 	localRoot    string
 	driveFileMap map[string]*FileHolder
 	driveFoldMap map[string]*FoldHolder
 	pathMap      map[string]string
-	updating     [3]int
 	id           int
+	userID       string
+	isSaving     bool
 }
 
 // AccessLock is the handle to access the locked resource
 type AccessLock struct {
-	resource int8
-	id       int
-	gs       *GDStore
+	id int
+	gs *GDStore
 }
 
-const (
-	// R_FILEMAP filemap resource
-	R_FILEMAP int8 = 0
-	// R_FOLDMAP foldmap resource
-	R_FOLDMAP int8 = 1
-	// R_PATHMAP pathmap resource
-	R_PATHMAP int8 = 2
-	//
+// StoreWrite can write and read
+type StoreWrite interface {
+	ReadFile(string, bool) (*FileHolder, error)
+	ReadFold(string, bool) (*FoldHolder, error)
+	ReadIDMap(string, bool) (string, error)
+	WriteFile(string, *FileHolder, bool) error
+	WriteFold(string, *FoldHolder, bool) error
+	WriteIDMap(string, string, bool) error
+	DeleteFile(string, bool) error
+	DeleteFold(string, bool) error
+	DeleteIDMap(string, bool) error
+	Release() error
+}
 
-)
+// StoreRead can only read
+type StoreRead interface {
+	ReadFile(string, bool) (*FileHolder, error)
+	ReadFold(string, bool) (*FoldHolder, error)
+	ReadIDMap(string, bool) (string, error)
+	Release() error
+}
 
 var (
 	// ErrNotFound key not found error
@@ -51,12 +60,12 @@ var (
 	ErrAlRelease = errors.New("resource is already released")
 	// ErrInvaID invalid id to unlock resource
 	ErrInvaID = errors.New("invalid id to unlock resource")
-
-	// drive states for different users
-
 )
 
-var gdstore *GDStore = nil
+var (
+	// drive states for different users
+	drivestore map[string]*GDStore = make(map[string]*GDStore)
+)
 
 // FileHolder holds a file
 type FileHolder struct {
@@ -83,180 +92,264 @@ func NewStore(id string) (*GDStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	local, err := set.Get(id)
+	local, err := set.GetUser(id)
 	if err != nil {
 		return nil, err
 	}
-	gs := new(GDStore)
+
+	gs, ok := drivestore[id]
+	if !ok {
+		gs = new(GDStore)
+		gs.driveFileMap = make(map[string]*FileHolder, 10000)
+		gs.driveFoldMap = make(map[string]*FoldHolder, 10000)
+		gs.pathMap = make(map[string]string, 10000)
+		gs.id = 0
+		gs.accessID = -1
+		gs.accessCond = sync.NewCond(&gs.accessMux)
+		drivestore[id] = gs
+	}
+
 	gs.localRoot = local.LocalRoot
-	gs.driveFileMap = make(map[string]*FileHolder, 10000)
-	gs.driveFoldMap = make(map[string]*FoldHolder, 10000)
-	gs.pathMap = make(map[string]string, 10000)
-	gs.id = 0
-	gs.updating = [3]int{-1, -1, -1}
+	gs.userID = id
+
 	return gs, nil
 }
 
-// AccessFile allows access to fileMap
-// args: (fileID: id of file, checkExist: if set true,
+// ReadFile reads fileMap
+// args: (fileID: id of file; blocking: if set true,
+// returns ErrInuse if resource is being used, and
 // returns ErrNotFound if no such element)
-func (al *AccessLock) AccessFile(fileID string, checkExist bool) (*FileHolder, error) {
-	if al.gs.updating[al.resource] != al.id {
-		return nil, ErrInUse
-	}
-	al.gs.fileMapMux.Lock()
-	defer al.gs.fileMapMux.Unlock()
-	if checkExist {
-		ss, ok := al.gs.driveFileMap[fileID]
-		if !ok {
-			return nil, ErrNotFound
+func (al *AccessLock) ReadFile(fileID string, blocking bool) (*FileHolder, error) {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return nil, ErrInUse
 		}
-		return ss, nil
+		al.gs.accessCond.Wait()
 	}
-	al.gs.driveFileMap[fileID] = new(FileHolder)
-	return al.gs.driveFileMap[fileID], nil
+
+	ss, ok := al.gs.driveFileMap[fileID]
+	if !ok {
+		al.gs.accessCond.L.Unlock()
+		return nil, ErrNotFound
+	}
+	sss := new(FileHolder)
+	*sss = *ss
+	al.gs.accessCond.L.Unlock()
+	return sss, nil
+
+}
+
+// WriteFile writes fileMap
+// args: (fileID: id of file; blocking: if set true,
+// returns ErrInuse if resource is being used)
+func (al *AccessLock) WriteFile(fileID string, fh *FileHolder, blocking bool) error {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return ErrInUse
+		}
+		al.gs.accessCond.Wait()
+
+	}
+	ss := new(FileHolder)
+	*ss = *fh
+	al.gs.driveFileMap[fileID] = ss
+	al.gs.accessCond.L.Unlock()
+	return nil
 
 }
 
 // DeleteFile deletes entry in filemap with fileID
-func (al *AccessLock) DeleteFile(fileID string) error {
-	if al.gs.updating[al.resource] != al.id {
-		return ErrInUse
+func (al *AccessLock) DeleteFile(fileID string, blocking bool) error {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return ErrInUse
+		}
+		al.gs.accessCond.Wait()
+
 	}
-	al.gs.fileMapMux.Lock()
-	defer al.gs.fileMapMux.Unlock()
 	delete(al.gs.driveFileMap, fileID)
+	al.gs.accessCond.L.Unlock()
 	return nil
 }
 
-// AccessFold allows access to foldMap
-// args: (fileID: id of file, checkExist: if set true,
+// ReadFold reads foldMap
+// args: (fileID: id of file; blocking: if set true,
+// returns ErrInuse if resource is being used, and
 // returns ErrNotFound if no such element)
-func (al *AccessLock) AccessFold(fileID string, checkExist bool) (*FoldHolder, error) {
-	if al.gs.updating[al.resource] != al.id {
-		return nil, ErrInUse
-	}
-	al.gs.foldMapMux.Lock()
-	defer al.gs.foldMapMux.Unlock()
-	if checkExist {
-		ss, ok := al.gs.driveFoldMap[fileID]
-		if !ok {
-			return nil, ErrNotFound
+func (al *AccessLock) ReadFold(fileID string, blocking bool) (*FoldHolder, error) {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return nil, ErrInUse
 		}
-		return ss, nil
+		al.gs.accessCond.Wait()
 	}
-	al.gs.driveFoldMap[fileID] = new(FoldHolder)
-	return al.gs.driveFoldMap[fileID], nil
+
+	ss, ok := al.gs.driveFoldMap[fileID]
+	if !ok {
+		al.gs.accessCond.L.Unlock()
+		return nil, ErrNotFound
+	}
+	sss := new(FoldHolder)
+	*sss = *ss
+	al.gs.accessCond.L.Unlock()
+	return sss, nil
+
 }
 
-// DeleteFold deletes the entry in foldmap with fileID
-func (al *AccessLock) DeleteFold(fileID string) error {
-	if al.gs.updating[al.resource] != al.id {
-		return ErrInUse
+// WriteFold writes foldMap
+// args: (fileID: id of file; blocking: if set true,
+// returns ErrInuse if resource is being used)
+func (al *AccessLock) WriteFold(fileID string, fh *FoldHolder, blocking bool) error {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return ErrInUse
+		}
+		al.gs.accessCond.Wait()
 	}
-	al.gs.foldMapMux.Lock()
-	defer al.gs.foldMapMux.Unlock()
+	ss := new(FoldHolder)
+	*ss = *fh
+	al.gs.driveFoldMap[fileID] = ss
+	al.gs.accessCond.L.Unlock()
+	return nil
+
+}
+
+// DeleteFold deletes entry in foldMap with fileID
+func (al *AccessLock) DeleteFold(fileID string, blocking bool) error {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return ErrInUse
+		}
+		al.gs.accessCond.Wait()
+	}
 	delete(al.gs.driveFoldMap, fileID)
+	al.gs.accessCond.L.Unlock()
 	return nil
 }
 
-// AccessIDMap allows access to IDMap
-// args: (fileID: id of file, write: if set true,
-// returns ErrNotFound if no such element, content: id input)
-func (al *AccessLock) AccessIDMap(path string, write bool, content *string) error {
-	if al.gs.updating[al.resource] != al.id {
-		return ErrInUse
-	}
-	al.gs.pathMapMux.Lock()
-	defer al.gs.pathMapMux.Unlock()
-	if write {
-		al.gs.pathMap[path] = *content
-	} else {
-
-		ss, ok := al.gs.pathMap[path]
-		if !ok {
-			return ErrNotFound
+// ReadIDMap reads pathMap
+// args: (fileID: id of file; blocking: if set true,
+// returns ErrInuse if resource is being used, and
+// returns ErrNotFound if no such element)
+func (al *AccessLock) ReadIDMap(path string, blocking bool) (string, error) {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return "", ErrInUse
 		}
-		*content = ss
+		al.gs.accessCond.Wait()
 	}
 
+	ss, ok := al.gs.pathMap[path]
+	if !ok {
+		al.gs.accessCond.L.Unlock()
+		return "", ErrNotFound
+	}
+
+	al.gs.accessCond.L.Unlock()
+	return ss, nil
+
+}
+
+// WriteIDMap writes pathMap
+// args: (fileID: id of file; blocking: if set true,
+// returns ErrInuse if resource is being used)
+func (al *AccessLock) WriteIDMap(path string, st string, blocking bool) error {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return ErrInUse
+		}
+		al.gs.accessCond.Wait()
+	}
+
+	al.gs.pathMap[path] = st
+	al.gs.accessCond.L.Unlock()
+	return nil
+
+}
+
+// DeleteIDMap deletes entry in pathMap with fileID
+func (al *AccessLock) DeleteIDMap(path string, blocking bool) error {
+	al.gs.accessCond.L.Lock()
+	for al.gs.accessID != al.id {
+		if !blocking {
+			al.gs.accessCond.L.Unlock()
+			return ErrInUse
+		}
+		al.gs.accessCond.Wait()
+	}
+	delete(al.gs.pathMap, path)
+	al.gs.accessCond.L.Unlock()
 	return nil
 }
 
-//DeleteIDMap deletes the entry in IDMap with fileID
-func (al *AccessLock) DeleteIDMap(fileID string) error {
-	if al.gs.updating[al.resource] != al.id {
-		return ErrInUse
-	}
-	al.gs.pathMapMux.Lock()
-	defer al.gs.pathMapMux.Unlock()
-	delete(al.gs.pathMap, fileID)
-	return nil
-}
-
-// Acquire the resource specified by "resource"
-// returns (id, error). This is used to indicate
+// AcquireWrite acquires write to the resource specified
+// by "resource" returns (id, error). This is used to indicate
 // the drive state is under heavy modification
-func (gs *GDStore) Acquire(resource int8) (*AccessLock, error) {
-	gs.updateMux.Lock()
-	defer gs.updateMux.Unlock()
-	a := gs.getNewID()
-	switch resource {
-	case R_FILEMAP:
-		if gs.updating[R_FILEMAP] == -1 {
-			gs.updating[R_FILEMAP] = a
-			al := new(AccessLock)
-			al.resource = R_FILEMAP
-			al.id = a
-			al.gs = gs
-			return al, nil
-		}
-		return nil, ErrInUse
-	case R_FOLDMAP:
-		if gs.updating[R_FOLDMAP] == -1 {
-			gs.updating[R_FOLDMAP] = a
-			al := new(AccessLock)
-			al.resource = R_FOLDMAP
-			al.id = a
-			al.gs = gs
-			return al, nil
-		}
-		return nil, ErrInUse
-	case R_PATHMAP:
-		if gs.updating[R_PATHMAP] == -1 {
-			gs.updating[R_PATHMAP] = a
-			al := new(AccessLock)
-			al.resource = R_PATHMAP
-			al.id = a
-			al.gs = gs
-			return al, nil
-		}
-		return nil, ErrInUse
-	default:
-		panic(errors.New("undefined resource"))
+func (gs *GDStore) AcquireWrite() (StoreWrite, error) {
+
+	gs.accessCond.L.Lock()
+	defer gs.accessCond.L.Unlock()
+	if gs.accessID == -1 {
+		al := new(AccessLock)
+		al.id = gs.getNewID()
+		al.gs = gs
+		gs.accessID = al.id
+		return al, nil
 	}
+	return nil, ErrInUse
+
 }
 
-// IsLocked checks whether "resource" is currently being accessed
-func (gs *GDStore) IsLocked(resource int8) bool {
-	gs.updateMux.Lock()
-	defer gs.updateMux.Unlock()
-	if gs.updating[resource] == -1 {
-		return false
-	}
-	return true
+// AcquireRead returns the handle to the "resource"
+// if the resource is not acquired to be written.
+func (gs *GDStore) AcquireRead() (StoreRead, error) {
+	al := new(AccessLock)
+	al.id = -1
+	al.gs = gs
+	return al, nil
+
 }
 
-// Release the hold on "resource"
-func (gs *GDStore) Release(al *AccessLock) error {
-	gs.updateMux.Lock()
-	defer gs.updateMux.Unlock()
-	if gs.updating[al.resource] != -1 {
+// IsLocked checks whether "resource" is currently
+// being accessed. Highly inaccurate.
+func (gs *GDStore) IsLocked() bool {
 
-		if gs.updating[al.resource] == al.id {
+	gs.accessCond.L.Lock()
+	defer gs.accessCond.L.Unlock()
+	return gs.accessID != -1
+
+}
+
+// Release the hold on the resource acquired
+func (al *AccessLock) Release() error {
+
+	if al.gs.accessID != -1 && al.id != -1 {
+
+		if al.gs.accessID == al.id {
+			al.gs.accessID = -1
+			al.gs.accessCond.Broadcast()
 			return nil
 		}
 		return ErrInvaID
+	}
+	if al.id == -1 {
+		return nil
 	}
 	return ErrAlRelease
 
@@ -308,8 +401,16 @@ func (gs *GDStore) writeFolds(foldList string, foldIDmap string) {
 
 // Save the current drive state to the files as (foldList, fileList, foldIDMap)
 func (gs *GDStore) Save(foldList string, fileList string, foldIDMap string) {
+	if gs.isSaving {
+		return
+	}
+	gs.isSaving = true
 	go func() {
+		defer func() {
+			gs.isSaving = false
+		}()
 		gs.writeFiles(fileList)
 		gs.writeFolds(foldList, foldIDMap)
+
 	}()
 }

@@ -6,6 +6,7 @@ import (
 	"godrive/internal/gdrive"
 	"godrive/internal/googleclient"
 	"godrive/internal/localfs"
+	"godrive/internal/settings"
 	"godrive/internal/watcher"
 	"log"
 	"time"
@@ -31,7 +32,7 @@ func handleGDriveError(err error) {
 
 func remoteSync() {
 	begin1 := time.Now()
-	gclient, err := gdrive.NewClient("/home/kie/test", "root", store)
+	gclient, err := gdrive.NewClient(userID)
 	handleGDriveError(err)
 	if err != nil {
 		log.Fatalf("Undefined error: %v", err)
@@ -44,20 +45,22 @@ func remoteSync() {
 	// sd <- &gdrive.ListProgress{Command: gdrive.C_CANCEL}
 loop:
 	for {
-		a := sd
+
 		select {
-		case r := <-a.Error():
-			fmt.Printf("error: %v\n", r)
+		case r := <-sd.Error():
+			fmt.Printf("Error: %v", fmt.Errorf("%w\n", r))
+
 		default:
 		}
 		select {
-		case r := <-a.Progress():
+		case r := <-sd.Progress():
 			r1, r2 := r.Folders, r.Files
 			fmt.Printf("folders: %d files: %d\n", r1, r2)
 			if r.Done {
 				break loop
 			}
-
+		default:
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
@@ -73,8 +76,8 @@ func localSync() {
 
 	select {
 	case r := <-fw2:
-		r1, r2, err := r.Folders, r.Files, r.Error
-		fmt.Printf("folders: %d files: %d error: %v\n", r1, r2, err)
+		r1, r2 := r.Folders, r.Files
+		fmt.Printf("folders: %d files: %d error: \n", r1, r2)
 	}
 	elapsed2 := time.Now().Sub(begin2).Seconds()
 	fmt.Printf("time spent: %f s\n", elapsed2)
@@ -94,7 +97,7 @@ func getChange(d *watcher.DriveWatcher) {
 }
 
 func watchChanges() {
-	d, err := watcher.RegDriveWatcher(0)
+	d, err := watcher.RegDriveWatcher(userID)
 
 	if err == nil {
 		for {
@@ -105,54 +108,30 @@ func watchChanges() {
 }
 
 func download() {
-	a, err := gdrive.NewClient("/home/kie/test", "root", store)
+	a, err := gdrive.NewClient(userID)
 	_ = err
-	ch := a.Download("1Qx2tb7_HbxeLEHvmG0ECvbmrRz0-ky9d", "/")
-
-	now := time.Now()
-	var fired = false
-
-loop:
-	for {
-		select {
-		case r := <-ch:
-			if r == nil {
-				break
-			}
-			if r.Err != nil {
-				fmt.Printf("error : %v\n", r.Err)
-				break loop
-			}
-
-			if r.Done {
-				break loop
-			}
-
-		}
-
-		if time.Now().Sub(now).Seconds() > 5 && !fired {
-			a := new(gdrive.UDLProgress)
-
-			ch <- a
-			fired = true
-		}
-
-	}
-
+	dh := a.Download("1Qx2tb7_HbxeLEHvmG0ECvbmrRz0-ky9d", "/")
+	_ = dh
 }
 
 func mkdir() {
-	a, err := gdrive.NewClient("/home/kie/test", "root", store)
+	a, err := gdrive.NewClient(userID)
 	_ = err
 	a.MkdirAll("/hello")
 	time.Sleep(10 * time.Second)
 }
 
-var store *gdrive.GDStore
+var userID string
 
 func main() {
-	store = gdrive.NewStore("/home/kie/test", "root")
-	watchChanges()
+	config, err := settings.ReadDriveConfig()
+	fmt.Printf("error: %v\n", err)
+	userID = config.Add(&settings.UserConfigs{
+		AccountName: "duckfat0000@gmail.com",
+		LocalRoot:   "/home/kie/test"})
+	defer settings.SaveDriveConfig()
+
+	// watchChanges()
 	remoteSync()
 	// download()
 	// mkdir()

@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"crypto/md5"
 	"encoding/json"
-	"errors"
+
 	// "fmt"
 	"github.com/oleiade/lane"
 	"github.com/panjf2000/ants/v2"
@@ -13,7 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime/debug"
+
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,12 +89,12 @@ func (fw *LocalClient) hashsum(path string, info os.FileInfo) *File {
 
 	}
 	f, openerr := os.Open(abspath)
-	fw.onError(openerr)
+	checkErr(openerr)
 	defer f.Close()
 	if openerr == nil {
 		h1 := md5.New()
 		_, copyerr := io.Copy(h1, f)
-		fw.onError(copyerr)
+		checkErr(copyerr)
 		h2 := md5.New()
 		io.WriteString(h2, relpath)
 
@@ -156,7 +156,7 @@ func (fw *LocalClient) listAll() {
 		if p.Free() > 0 && !fw.folderQueue.Empty() {
 			atomic.AddInt32(&fw.onGoingRequests, 1)
 
-			fw.onError(p.Invoke([3]interface{}{foldChan, fileChan,
+			checkErr(p.Invoke([3]interface{}{foldChan, fileChan,
 				fw.folderQueue.Dequeue()}))
 
 		} else {
@@ -170,7 +170,7 @@ func (fw *LocalClient) listAll() {
 
 	fw.writeWait.Wait()
 	fw.progressChan <- &Progress{Files: int(fw.filecount), Folders: int(fw.foldcount),
-		Error: nil, Done: true}
+		Done: true}
 
 }
 
@@ -187,7 +187,7 @@ func (fw *LocalClient) recursiveFoldsearch(args interface{}) {
 	}
 	folderAbs := filepath.Join(fw.rootDir, folderRel)
 	folders, err := ioutil.ReadDir(folderAbs)
-	fw.onError(err)
+	checkErr(err)
 	if err != nil {
 		return
 	}
@@ -210,15 +210,15 @@ func (fw *LocalClient) recursiveFoldsearch(args interface{}) {
 func (fw *LocalClient) writeFiles(filename string, outchan chan *File) {
 	foldpath := filepath.Join(fw.rootDir, ".GoDrive", "local")
 	errMk := os.MkdirAll(foldpath, 0777)
-	fw.onError(errMk)
+	checkErr(errMk)
 
 	file, err := os.Create(filepath.Join(foldpath, filename))
-	fw.onError(err)
+	checkErr(err)
 	writer := bufio.NewWriter(file)
 	defer file.Close()
 
 	_, err1 := writer.WriteString("[")
-	fw.onError(err1)
+	checkErr(err1)
 	var i *File
 	var ok bool = true
 	i, ok = <-outchan
@@ -227,22 +227,22 @@ func (fw *LocalClient) writeFiles(filename string, outchan chan *File) {
 		if i != nil {
 			mr, marErr := json.Marshal(i)
 			_, writeErr := writer.WriteString(string(mr))
-			fw.onError(marErr)
-			fw.onError(writeErr)
+			checkErr(marErr)
+			checkErr(writeErr)
 		}
 		i, ok = <-outchan
 		if ok {
 			e, err := writer.WriteString(",\n")
 			_ = e
-			fw.onError(err)
+			checkErr(err)
 		}
 
 	}
 
 	_, err2 := writer.WriteString("]")
-	fw.onError(err2)
+	checkErr(err2)
 	err3 := writer.Flush()
-	fw.onError(err3)
+	checkErr(err3)
 	fw.writeWait.Done()
 
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"godrive/internal/utils"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -66,13 +67,13 @@ func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
 	var authCode string
 	_, err := fmt.Scan(&authCode)
 	if err != nil {
-		return nil, newError(ErrUserAuthCodeError, err)
+		return nil, utils.NewError(ErrUserAuthCodeError, err)
 
 	}
 
 	tok, err := config.Exchange(context.TODO(), authCode)
 	if err != nil {
-		return nil, newError(ErrAuthWebCode, err)
+		return nil, utils.NewError(ErrAuthWebCode, err)
 
 	}
 	return tok, nil
@@ -96,7 +97,7 @@ func saveToken(path string, token *oauth2.Token) error {
 	fmt.Printf("Saving credential file to: %s\n", path)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return newError(ErrCacheOauth, err)
+		return utils.NewError(ErrCacheOauth, err)
 	}
 	defer f.Close()
 	err = json.NewEncoder(f).Encode(token)
@@ -114,13 +115,13 @@ func NewService(id string) (*drive.Service, error) {
 
 	b, err := ioutil.ReadFile("./secrets/client_secret_1.json")
 	if err != nil {
-		return nil, newError(ErrReadSecret, err)
+		return nil, utils.NewError(ErrReadSecret, err)
 	}
 
 	// If modifying these scopes, delete your previously saved token.json.
 	config, err := google.ConfigFromJSON(b, drive.DriveScope)
 	if err != nil {
-		return nil, newError(ErrParseError, err)
+		return nil, utils.NewError(ErrParseError, err)
 	}
 	client, err := getClient(id, config)
 	if err != nil {
@@ -132,26 +133,4 @@ func NewService(id string) (*drive.Service, error) {
 	}
 
 	return srv, err
-}
-
-type googleClientErr struct {
-	outerr error
-	inerr  error
-}
-
-func (ce *googleClientErr) Error() string {
-	return ce.outerr.Error()
-}
-
-func (ce *googleClientErr) Unwrap() error {
-	return ce.inerr
-}
-
-func (ce *googleClientErr) Is(target error) bool {
-	return ce.outerr == target
-}
-
-func newError(errorType error, err error) error {
-	aa := &googleClientErr{outerr: errorType, inerr: err}
-	return aa
 }

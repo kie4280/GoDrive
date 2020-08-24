@@ -1,8 +1,11 @@
 package settings
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -21,8 +24,7 @@ type GlobalConfig struct {
 
 // UserConfigs contains the setting of a particular user
 type UserConfigs struct {
-	Account     string
-	DriveRootID string
+	AccountName string
 	LocalRoot   string
 }
 
@@ -51,7 +53,9 @@ func ReadDriveConfig() (*DriveConfigs, error) {
 		if os.IsNotExist(err) {
 			config := new(GlobalConfig)
 			config.Usercount = 0
-			return &DriveConfigs{global: config}, nil
+			config.Users = make(map[string]*UserConfigs)
+			driveconfig = &DriveConfigs{global: config}
+			return driveconfig, nil
 		}
 
 		return nil, err
@@ -60,11 +64,12 @@ func ReadDriveConfig() (*DriveConfigs, error) {
 	err = json.NewDecoder(file).Decode(config)
 	out := new(DriveConfigs)
 	out.global = config
+	driveconfig = out
 	return out, err
 }
 
 // SaveDriveConfig saves the configuration of a user to file
-func SaveDriveConfig(configs *DriveConfigs) error {
+func SaveDriveConfig() error {
 	homedir, err := os.UserHomeDir()
 	if err != nil {
 		panic(err)
@@ -73,7 +78,7 @@ func SaveDriveConfig(configs *DriveConfigs) error {
 	os.MkdirAll(filepath.Join(homedir, ".GoDrive"), 0777)
 	file, err := os.Create(configPath)
 	defer file.Close()
-	err = json.NewEncoder(file).Encode(configs.global)
+	err = json.NewEncoder(file).Encode(driveconfig.global)
 	return err
 }
 
@@ -82,11 +87,32 @@ func (dc *DriveConfigs) ListIDs() []string {
 	return dc.global.AccountIDs
 }
 
-// Get the user with "id"
-func (dc *DriveConfigs) Get(id string) (*UserConfigs, error) {
+// GetUser the user with "id"
+func (dc *DriveConfigs) GetUser(id string) (*UserConfigs, error) {
 	ur, ok := dc.global.Users[id]
 	if !ok {
 		return nil, ErrNoSuchUser
 	}
 	return ur, nil
+}
+
+// Add user to global config and return the user Id
+func (dc *DriveConfigs) Add(user *UserConfigs) string {
+	id := GetID(user.AccountName)
+	_, ok := dc.global.Users[id]
+	if !ok {
+		dc.global.Usercount++
+		dc.global.AccountIDs = append(dc.global.AccountIDs, id)
+	}
+
+	dc.global.Users[id] = user
+	return id
+}
+
+// GetID gets the id of a particular account name
+func GetID(account string) string {
+	hash := md5.New()
+	io.WriteString(hash, account)
+	id := hex.EncodeToString(hash.Sum(nil))
+	return id
 }

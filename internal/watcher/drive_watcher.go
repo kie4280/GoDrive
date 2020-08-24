@@ -15,12 +15,12 @@ const (
 type DriveWatcher struct {
 	lastSync           time.Time
 	lastStartPageToken string
-	userID             int
+	userID             string
 	service            *drive.Service
 }
 
 // RegDriveWatcher returns a new watcher for drive (id: userID)
-func RegDriveWatcher(id int) (*DriveWatcher, error) {
+func RegDriveWatcher(id string) (*DriveWatcher, error) {
 	dd := new(DriveWatcher)
 	dd.userID = id
 	dd.lastSync = time.Now()
