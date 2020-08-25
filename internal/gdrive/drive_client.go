@@ -26,6 +26,8 @@ const (
 	minGoroutine    = 2
 	batchSize       = 100
 	minWaitingBatch = 4
+	listAllQuery    = "nextPageToken, files(id, name, mimeType," +
+		" modifiedTime, md5Checksum, parents)"
 
 	// C_CANCEL cancels the listAll operation
 	C_CANCEL int8 = 1
@@ -34,6 +36,8 @@ const (
 	S_ACK int8 = -1
 	// S_TERM state terminated
 	S_TERM int8 = -2
+	// S_RUNNING state running
+	S_RUNNING int8 = -3
 )
 
 var (
@@ -41,6 +45,9 @@ var (
 	ErrJammed = errors.New("The channel is jammed")
 	// ErrCanceled is the error thrown when the operation is canceled
 	ErrCanceled = errors.New("The operation is canceled")
+	// ErrNoResponse is the error thrown when the command does return
+	// ACK before timeout
+	ErrNoResponse = errors.New("There is no response from the receiver")
 )
 
 // DriveClient represents a google drive client object
@@ -134,20 +141,26 @@ type ListHdl struct {
 
 // SendComd sends command to ListAll. Returns error
 func (ls *ListHdl) SendComd(command int8) error {
-	select {
-	case ls.commandChan <- command:
+	start := time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case ls.commandChan <- command:
 
-		a := <-ls.commandChan
-		switch a {
-		case S_TERM:
-			ls.commandChan <- S_TERM
-		case S_ACK:
+			a := <-ls.commandChan
+			switch a {
+			case S_TERM:
+				ls.commandChan <- S_TERM
+			case S_ACK:
+			}
+
+			return nil
+		default:
+			time.Sleep(20 * time.Millisecond)
 		}
-
-		return nil
-	default:
-		return ErrJammed
 	}
+
+	return ErrJammed
+
 }
 
 // Progress returns the channel for progress
@@ -159,7 +172,8 @@ func (ls *ListHdl) Error() <-chan error {
 	return ls.errChan
 }
 
-// ListAll write a list of folders and files to "location". Returns ListProgress struct if not already running, else returns nil
+// ListAll write a list of folders and files to "location".
+// Returns ListProgress struct if not already running, else returns nil
 func (drive *DriveClient) ListAll() *ListHdl {
 	if drive.isListRunning {
 		return nil
@@ -195,6 +209,7 @@ func (ls *ListHdl) listAll() {
 		err = ls.storeW.Release()
 		checkErr(err)
 		ls.drive.isListRunning = false
+		ls.drive.canRunList = false
 	}()
 	ls.drive.canRunList = true
 	ls.drive.isListRunning = true
@@ -258,10 +273,11 @@ func (ls *ListHdl) listAll() {
 			time.Millisecond) // preventing exceed user rate limit
 
 		if time.Now().Sub(progTimer).Milliseconds() >= 1000 {
-			if len(ls.progressChan) >= 9 {
+			if len(ls.progressChan) >= 4 {
 				<-ls.progressChan
 			}
-			ls.progressChan <- &ListProgress{Files: int(atomic.LoadInt32(&ls.filecount)),
+			ls.progressChan <- &ListProgress{
+				Files:   int(atomic.LoadInt32(&ls.filecount)),
 				Folders: int(atomic.LoadInt32(&ls.foldcount)), Done: false}
 			progTimer = time.Now()
 		}
@@ -289,7 +305,6 @@ func (ls *ListHdl) recursiveFoldSearch(args interface{}) {
 		return
 	}
 	defer ls.onListError()
-	// fmt.Printf("recursiveFold\n")
 
 	var str strings.Builder
 	str.WriteString("(")
@@ -302,10 +317,9 @@ func (ls *ListHdl) recursiveFoldSearch(args interface{}) {
 		}
 	}
 	str.WriteString(") and trashed=false")
-	// fmt.Printf("string buffer: %s\n", str.String())
 
 	r, err := drive.service.Files.List().PageSize(1000).
-		Fields("nextPageToken, files(id, name, mimeType, modifiedTime, md5Checksum, parents)").
+		Fields(listAllQuery).
 		Q(str.String()).PageToken(batch.nextPageToken).
 		Spaces("drive").Corpora("user").Do()
 	if err != nil {
@@ -433,8 +447,10 @@ func (wc *writeCounter) Write(p []byte) (int, error) {
 		if wc.totalBytes == 0 {
 			wc.prog <- &UDLProgress{Percentage: -1, Done: false, File: nil}
 		} else {
-			wc.prog <- &UDLProgress{Percentage: float32(wc.accu) / float32(wc.totalBytes) * 100,
-				Done: false, File: nil}
+			wc.prog <- &UDLProgress{
+				Percentage: float32(wc.accu) / float32(wc.totalBytes) * 100,
+				Done:       false,
+				File:       nil}
 		}
 		wc.now = time.Now()
 	}
@@ -487,17 +503,22 @@ func (drive *DriveClient) Download(fileID string, dest string) *DownloadHdl {
 func (dl *DownloadHdl) download() {
 
 	defer dl.onDLError()
-	info, errI := dl.drive.service.Files.Get(dl.fileID).Fields("name, size, mimeType").Do()
+	info, errI := dl.drive.service.Files.Get(dl.fileID).
+		Fields("name, size, mimeType").Do()
 	checkErr(errI)
 	_ = info
-	res, errD := dl.drive.service.Files.Get(dl.fileID).AcknowledgeAbuse(false).Download()
+	res, errD := dl.drive.service.Files.Get(dl.fileID).
+		AcknowledgeAbuse(false).Download()
 	checkErr(errD)
 	defer res.Body.Close()
 	path := filepath.Join(dl.drive.localRoot, dl.dest, info.Name)
 	file, filerr := os.Create(path)
 	checkErr(filerr)
 	defer file.Close()
-	wc := &writeCounter{totalBytes: int64(info.Size), accu: 0, prog: dl.downloadProgChan}
+	wc := &writeCounter{
+		totalBytes: int64(info.Size),
+		accu:       0,
+		prog:       dl.downloadProgChan}
 	_, errC := io.Copy(file, io.TeeReader(res.Body, wc))
 	if !errors.Is(errC, ErrCanceled) {
 		checkErr(errC)
@@ -540,9 +561,11 @@ func (ul *UploadHdl) upload() {
 	checkErr(errOpen)
 	stat, errStat := content.Stat()
 	checkErr(errStat)
-	wc := &writeCounter{totalBytes: stat.Size(), accu: 0, prog: ul.uploadProgChan}
-	file, err := ul.drive.service.Files.Create(ul.metadata).EnforceSingleParent(true).
-		Media(io.TeeReader(content, wc)).Do()
+	wc := &writeCounter{totalBytes: stat.Size(),
+		accu: 0,
+		prog: ul.uploadProgChan}
+	file, err := ul.drive.service.Files.Create(ul.metadata).
+		EnforceSingleParent(true).Media(io.TeeReader(content, wc)).Do()
 	if !errors.Is(err, ErrCanceled) {
 		checkErr(err)
 	}

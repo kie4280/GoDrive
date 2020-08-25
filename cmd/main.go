@@ -92,11 +92,11 @@ func getChange(d *watcher.DriveWatcher) {
 			fmt.Printf("change: %v %v %v %v\n", i.Time, i.File.Name, i.File.Id, i.File.Parents)
 		}
 	} else {
-		fmt.Printf("getchange error: %v\n", e)
+		log.Fatalf("getchange error: %v\n", e)
 	}
 }
 
-func watchChanges() {
+func watchRemote() {
 	d, err := watcher.RegDriveWatcher(userID)
 
 	if err == nil {
@@ -105,6 +105,7 @@ func watchChanges() {
 			time.Sleep(3 * time.Second)
 		}
 	}
+
 }
 
 func download() {
@@ -121,19 +122,29 @@ func mkdir() {
 	time.Sleep(10 * time.Second)
 }
 
+func watchLocal() {
+	lw, err := watcher.RegfsWatcher(userID)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer lw.Close()
+
+}
+
 var userID string
 
 func main() {
 	config, err := settings.ReadDriveConfig()
-	fmt.Printf("error: %v\n", err)
+	fmt.Printf("setting error: %v\n", err)
 	userID = config.Add(&settings.UserConfigs{
 		AccountName: "duckfat0000@gmail.com",
 		LocalRoot:   "/home/kie/test"})
 	defer settings.SaveDriveConfig()
 
-	// watchChanges()
-	remoteSync()
+	watchRemote()
+	// remoteSync()
 	// download()
 	// mkdir()
+	// watchLocal()
 
 }

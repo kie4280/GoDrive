@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"github.com/shirou/gopsutil"
 	"godrive/internal/gdrive"
 )
 

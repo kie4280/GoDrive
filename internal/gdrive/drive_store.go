@@ -338,7 +338,8 @@ func (gs *GDStore) IsLocked() bool {
 
 // Release the hold on the resource acquired
 func (al *AccessLock) Release() error {
-
+	al.gs.accessCond.L.Lock()
+	defer al.gs.accessCond.L.Unlock()
 	if al.gs.accessID != -1 && al.id != -1 {
 
 		if al.gs.accessID == al.id {
