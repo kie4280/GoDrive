@@ -69,21 +69,20 @@ var (
 
 // FileHolder holds a file
 type FileHolder struct {
-	Name     string
-	MimeType string
-	ModTime  string
-	Parents  []string
-	Md5Chk   string
-	Dir      string
+	Name        string
+	MimeType    string
+	ModTime     string
+	DriveFileID string
+	Md5Chk      string
+	Dir         string
 }
 
 // FoldHolder holds a folder
 type FoldHolder struct {
-	Name     string
-	MimeType string
-	ModTime  string
-	Parents  []string
-	Dir      string
+	Name        string
+	ModTime     string
+	DriveFileID string
+	Dir         string
 }
 
 // NewStore new drive state storage
@@ -298,21 +297,25 @@ func (al *AccessLock) DeleteIDMap(path string, blocking bool) error {
 	return nil
 }
 
-// AcquireWrite acquires write to the resource specified
-// by "resource" returns (id, error). This is used to indicate
-// the drive state is under heavy modification
-func (gs *LCStore) AcquireWrite() (StoreWrite, error) {
+// AcquireWrite acquires write to the resource.
+// args: (blocking: block if set to true, otherwise return ErrInUse
+// if drive state is under heavy modification)
+func (gs *LCStore) AcquireWrite(blocking bool) (StoreWrite, error) {
 
 	gs.accessCond.L.Lock()
 	defer gs.accessCond.L.Unlock()
-	if gs.accessID == -1 {
-		al := new(AccessLock)
-		al.id = gs.getNewID()
-		al.gs = gs
-		gs.accessID = al.id
-		return al, nil
+	for gs.accessID != -1 {
+		if !blocking {
+			return nil, ErrInUse
+		}
+		gs.accessCond.Wait()
 	}
-	return nil, ErrInUse
+
+	al := new(AccessLock)
+	al.id = gs.getNewID()
+	al.gs = gs
+	gs.accessID = al.id
+	return al, nil
 
 }
 
@@ -368,7 +371,7 @@ func (gs *LCStore) getNewID() int {
 
 func (gs *LCStore) writeFiles(filename string) {
 
-	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "remote")
+	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "local")
 	errMk := os.MkdirAll(foldpath, 0777)
 	checkErr(errMk)
 
@@ -382,7 +385,7 @@ func (gs *LCStore) writeFiles(filename string) {
 
 func (gs *LCStore) writeFolds(foldList string, foldIDmap string) {
 
-	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "remote")
+	foldpath := filepath.Join(gs.localRoot, ".GoDrive", "local")
 	errMk := os.MkdirAll(foldpath, 0777)
 	checkErr(errMk)
 
@@ -402,16 +405,16 @@ func (gs *LCStore) writeFolds(foldList string, foldIDmap string) {
 
 // Save the current drive state to the files as (foldList, fileList, foldIDMap)
 func (gs *LCStore) Save(foldList string, fileList string, foldIDMap string) {
+	gs.accessMux.Lock()
+	defer gs.accessMux.Unlock()
 	if gs.isSaving {
 		return
 	}
 	gs.isSaving = true
-	go func() {
-		defer func() {
-			gs.isSaving = false
-		}()
-		gs.writeFiles(fileList)
-		gs.writeFolds(foldList, foldIDMap)
-
+	defer func() {
+		gs.isSaving = false
 	}()
+	gs.writeFiles(fileList)
+	gs.writeFolds(foldList, foldIDMap)
+
 }

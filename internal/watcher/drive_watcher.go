@@ -32,7 +32,7 @@ func RegDriveWatcher(id string) (*DriveWatcher, error) {
 	dd.refreshInterv = 6
 	var err error
 	dd.service, err = googleclient.NewService(id)
-	dd.changeList = make([]*drive.Change, 0, 5000)
+	dd.changeList = make([]*drive.Change, 0, remoteChangeListSize)
 	if err != nil {
 		return nil, err
 	}
@@ -91,14 +91,14 @@ func (dw *DriveWatcher) startWatcher() {
 
 }
 
-// GetDriveChanges gets changes since the last call to GetChanges or StartWatch
+// GetDriveChanges gets changes since the last call to GetDriveChanges
 func (dw *DriveWatcher) GetDriveChanges() ([]*drive.Change, error) {
 	if dw.globalError != nil {
 		return nil, dw.globalError
 	}
 	changes := make([]*drive.Change, len(dw.changeList))
 	copy(changes, dw.changeList)
-	dw.changeList = make([]*drive.Change, 0, 5000)
+	dw.changeList = make([]*drive.Change, 0, remoteChangeListSize)
 	return changes, nil
 }
 

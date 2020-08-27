@@ -31,6 +31,8 @@ const (
 
 	// C_CANCEL cancels the listAll operation
 	C_CANCEL int8 = 1
+	// C_QUERY queries the state
+	C_QUERY int8 = 2
 
 	// S_ACK state ACK received
 	S_ACK int8 = -1
@@ -108,11 +110,11 @@ func NewClient(id string) (*DriveClient, error) {
 	return client, nil
 }
 
-func (ls *ListHdl) onListError() {
+func (lh *ListHdl) onListError() {
 	if err := recover(); err != nil {
 		err1 := err.(error)
 		err1 = fmt.Errorf("%w\n%s", err1, string(debug.Stack()))
-		ls.errChan <- fmt.Errorf("DriveClient list error\n%w", err1)
+		lh.errChan <- fmt.Errorf("DriveClient list error\n%w", err1)
 	}
 }
 
@@ -140,16 +142,16 @@ type ListHdl struct {
 }
 
 // SendComd sends command to ListAll. Returns error
-func (ls *ListHdl) SendComd(command int8) error {
+func (lh *ListHdl) SendComd(command int8) error {
 	start := time.Now()
 	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
 		select {
-		case ls.commandChan <- command:
+		case lh.commandChan <- command:
 
-			a := <-ls.commandChan
+			a := <-lh.commandChan
 			switch a {
 			case S_TERM:
-				ls.commandChan <- S_TERM
+				lh.commandChan <- S_TERM
 			case S_ACK:
 			}
 
@@ -164,12 +166,12 @@ func (ls *ListHdl) SendComd(command int8) error {
 }
 
 // Progress returns the channel for progress
-func (ls *ListHdl) Progress() <-chan *ListProgress {
-	return ls.progressChan
+func (lh *ListHdl) Progress() <-chan *ListProgress {
+	return lh.progressChan
 }
 
-func (ls *ListHdl) Error() <-chan error {
-	return ls.errChan
+func (lh *ListHdl) Error() <-chan error {
+	return lh.errChan
 }
 
 // ListAll write a list of folders and files to "location".
@@ -191,120 +193,120 @@ func (drive *DriveClient) ListAll() *ListHdl {
 	return result
 }
 
-func (ls *ListHdl) listAll() {
+func (lh *ListHdl) listAll() {
 
-	p, errP := ants.NewPoolWithFunc(maxGoroutine, ls.recursiveFoldSearch)
+	p, errP := ants.NewPoolWithFunc(maxGoroutine, lh.recursiveFoldSearch)
 	if errP != nil {
 		log.Fatalf("There is a problem starting goroutine pool: %v", errP)
 	}
 
 	defer p.Release()
-	defer ls.onListError()
+	defer lh.onListError()
 
 	var err error
 
-	ls.storeW, err = ls.drive.store.AcquireWrite()
+	lh.storeW, err = lh.drive.store.AcquireWrite(true)
 	checkErr(err)
 	defer func() {
-		err = ls.storeW.Release()
+		err = lh.storeW.Release()
 		checkErr(err)
-		ls.drive.isListRunning = false
-		ls.drive.canRunList = false
+		lh.drive.isListRunning = false
+		lh.drive.canRunList = false
 	}()
-	ls.drive.canRunList = true
-	ls.drive.isListRunning = true
-	ls.onGoingRequests = 0
-	ls.requestInterv = 20
+	lh.drive.canRunList = true
+	lh.drive.isListRunning = true
+	lh.onGoingRequests = 0
+	lh.requestInterv = 20
 
-	ls.onGoingRequests = 0
-	ls.foldersearchQueue = lane.NewQueue()
-	ls.folderUnbatchSlice = make([]string, 0, batchSize)
+	lh.onGoingRequests = 0
+	lh.foldersearchQueue = lane.NewQueue()
+	lh.folderUnbatchSlice = make([]string, 0, batchSize)
 	ll := make([]string, 0, 1)
 	ll = append(ll, "root")
 
-	ls.foldersearchQueue.Enqueue(makeBatch(ll, ""))
+	lh.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 
-	ls.filecount, ls.foldcount = 0, 0
+	lh.filecount, lh.foldcount = 0, 0
 	var workDone bool = false
-	go ls.getComd()
+	go lh.getComd()
 	progTimer := time.Now()
 
-	for !workDone && ls.drive.canRunList {
+	for !workDone && lh.drive.canRunList {
 
-		largeQueue := ls.foldersearchQueue.Size() > minWaitingBatch
+		largeQueue := lh.foldersearchQueue.Size() > minWaitingBatch
 
 		if largeQueue {
-			for i := 0; i < maxGoroutine; i++ {
-				atomic.AddInt32(&ls.onGoingRequests, 1)
-				ls.unBatchMux.Lock()
-				if len(ls.folderUnbatchSlice) >= batchSize {
+			for i := 0; i < p.Free(); i++ {
+				atomic.AddInt32(&lh.onGoingRequests, 1)
+				lh.unBatchMux.Lock()
+				if len(lh.folderUnbatchSlice) >= batchSize {
 
-					ls.foldersearchQueue.Enqueue(
-						makeBatch(ls.folderUnbatchSlice[:batchSize], ""))
-					ls.folderUnbatchSlice = ls.folderUnbatchSlice[batchSize:]
+					lh.foldersearchQueue.Enqueue(
+						makeBatch(lh.folderUnbatchSlice[:batchSize], ""))
+					lh.folderUnbatchSlice = lh.folderUnbatchSlice[batchSize:]
 				}
-				ls.unBatchMux.Unlock()
+				lh.unBatchMux.Unlock()
 
 				checkErr(p.Invoke([1]interface{}{
-					ls.foldersearchQueue.Dequeue()}))
+					lh.foldersearchQueue.Dequeue()}))
 			}
 
 		} else if !largeQueue && maxGoroutine-p.Free() <= minGoroutine {
-			atomic.AddInt32(&ls.onGoingRequests, 1)
-			ls.unBatchMux.Lock()
-			if len(ls.folderUnbatchSlice) >= batchSize {
+			atomic.AddInt32(&lh.onGoingRequests, 1)
+			lh.unBatchMux.Lock()
+			if len(lh.folderUnbatchSlice) >= batchSize {
 
-				ls.foldersearchQueue.Enqueue(
-					makeBatch(ls.folderUnbatchSlice[:batchSize], ""))
-				ls.folderUnbatchSlice = ls.folderUnbatchSlice[batchSize:]
-			} else if len(ls.folderUnbatchSlice) > 0 {
-				ls.foldersearchQueue.Enqueue(makeBatch(ls.folderUnbatchSlice, ""))
-				ls.folderUnbatchSlice = make([]string, 0, batchSize)
+				lh.foldersearchQueue.Enqueue(
+					makeBatch(lh.folderUnbatchSlice[:batchSize], ""))
+				lh.folderUnbatchSlice = lh.folderUnbatchSlice[batchSize:]
+			} else if len(lh.folderUnbatchSlice) > 0 {
+				lh.foldersearchQueue.Enqueue(makeBatch(lh.folderUnbatchSlice, ""))
+				lh.folderUnbatchSlice = make([]string, 0, batchSize)
 			}
-			ls.unBatchMux.Unlock()
+			lh.unBatchMux.Unlock()
 			checkErr(p.Invoke([1]interface{}{
-				ls.foldersearchQueue.Dequeue()}))
+				lh.foldersearchQueue.Dequeue()}))
 			time.Sleep(100 * time.Millisecond) // sleep longer
 		}
-		if atomic.LoadInt32(&ls.requestInterv) > 0 {
-			atomic.AddInt32(&ls.requestInterv, -10)
+		if atomic.LoadInt32(&lh.requestInterv) > 0 {
+			atomic.AddInt32(&lh.requestInterv, -10)
 		}
-		time.Sleep(time.Duration(atomic.LoadInt32(&ls.requestInterv)) *
+		time.Sleep(time.Duration(atomic.LoadInt32(&lh.requestInterv)) *
 			time.Millisecond) // preventing exceed user rate limit
 
 		if time.Now().Sub(progTimer).Milliseconds() >= 1000 {
-			if len(ls.progressChan) >= 4 {
-				<-ls.progressChan
+			if len(lh.progressChan) >= 4 {
+				<-lh.progressChan
 			}
-			ls.progressChan <- &ListProgress{
-				Files:   int(atomic.LoadInt32(&ls.filecount)),
-				Folders: int(atomic.LoadInt32(&ls.foldcount)), Done: false}
+			lh.progressChan <- &ListProgress{
+				Files:   int(atomic.LoadInt32(&lh.filecount)),
+				Folders: int(atomic.LoadInt32(&lh.foldcount)), Done: false}
 			progTimer = time.Now()
 		}
 
-		ls.unBatchMux.Lock()
-		workDone = ls.foldersearchQueue.Empty() &&
-			atomic.LoadInt32(&ls.onGoingRequests) == 0 &&
-			len(ls.folderUnbatchSlice) == 0
-		ls.unBatchMux.Unlock()
+		lh.unBatchMux.Lock()
+		workDone = lh.foldersearchQueue.Empty() &&
+			atomic.LoadInt32(&lh.onGoingRequests) == 0 &&
+			len(lh.folderUnbatchSlice) == 0
+		lh.unBatchMux.Unlock()
 
 	}
 
-	ls.progressChan <- &ListProgress{Files: int(ls.filecount),
-		Folders: int(ls.foldcount), Done: ls.drive.canRunList}
+	lh.progressChan <- &ListProgress{Files: int(lh.filecount),
+		Folders: int(lh.foldcount), Done: lh.drive.canRunList}
 
 }
 
-func (ls *ListHdl) recursiveFoldSearch(args interface{}) {
-	drive := ls.drive
+func (lh *ListHdl) recursiveFoldSearch(args interface{}) {
+	drive := lh.drive
 	unpackArgs := args.([1]interface{})
 
 	batch, ok := unpackArgs[0].(*foldBatch)
 	if !ok || len(batch.ids) == 0 {
-		atomic.AddInt32(&ls.onGoingRequests, -1)
+		atomic.AddInt32(&lh.onGoingRequests, -1)
 		return
 	}
-	defer ls.onListError()
+	defer lh.onListError()
 
 	var str strings.Builder
 	str.WriteString("(")
@@ -326,9 +328,9 @@ func (ls *ListHdl) recursiveFoldSearch(args interface{}) {
 
 		match := drive.userRateLimitExceed.FindString(err.Error())
 		if match != "" {
-			ls.foldersearchQueue.Enqueue(batch)
-			atomic.AddInt32(&ls.requestInterv, 200)
-			atomic.AddInt32(&ls.onGoingRequests, -1)
+			lh.foldersearchQueue.Enqueue(batch)
+			atomic.AddInt32(&lh.requestInterv, 200)
+			atomic.AddInt32(&lh.onGoingRequests, -1)
 			fmt.Printf("rate limit: %v\n", err)
 			return
 		}
@@ -338,16 +340,16 @@ func (ls *ListHdl) recursiveFoldSearch(args interface{}) {
 
 	if r.NextPageToken != "" {
 		batch.nextPageToken = r.NextPageToken
-		ls.foldersearchQueue.Enqueue(batch)
+		lh.foldersearchQueue.Enqueue(batch)
 	}
 	ll := make([]string, 0, batchSize)
 
 	var parentPath string
 	if len(r.Files) > 0 {
-		fol, err := ls.storeW.ReadFold(r.Files[0].Parents[0], true)
+		fol, err := lh.storeW.ReadFold(r.Files[0].Parents[0], true)
 		if errors.Is(err, ErrNotFound) {
 			parentPath = "/"
-			ls.storeW.WriteIDMap("/", r.Files[0].Parents[0], true)
+			lh.storeW.WriteIDMap("/", r.Files[0].Parents[0], true)
 
 		} else {
 			parentPath = filepath.Join(fol.Dir, fol.Name)
@@ -360,37 +362,36 @@ func (ls *ListHdl) recursiveFoldSearch(args interface{}) {
 		if file.MimeType == "application/vnd.google-apps.folder" {
 			ll = append(ll, file.Id)
 
-			ls.storeW.WriteFold(file.Id, convFolStruct(file, parentPath), true)
-			err := ls.storeW.WriteIDMap(filepath.Join(parentPath,
+			lh.storeW.WriteFold(file.Id, convFolStruct(file, parentPath), true)
+			err := lh.storeW.WriteIDMap(filepath.Join(parentPath,
 				file.Name), file.Id, true)
 			_ = err
-			atomic.AddInt32(&ls.foldcount, 1)
+			atomic.AddInt32(&lh.foldcount, 1)
 		} else {
 
-			ls.storeW.WriteFile(file.Id, convFilStruct(file, parentPath), false)
-			atomic.AddInt32(&ls.filecount, 1)
+			lh.storeW.WriteFile(file.Id, convFilStruct(file, parentPath), false)
+			atomic.AddInt32(&lh.filecount, 1)
 		}
 
 		if len(ll) >= batchSize {
-			ls.foldersearchQueue.Enqueue(makeBatch(ll, ""))
+			lh.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 			ll = make([]string, 0, batchSize)
 		}
 	}
 	if len(ll) > 0 {
-		ls.unBatchMux.Lock()
-		ls.folderUnbatchSlice = append(ls.folderUnbatchSlice, ll...)
-		ls.unBatchMux.Unlock()
+		lh.unBatchMux.Lock()
+		lh.folderUnbatchSlice = append(lh.folderUnbatchSlice, ll...)
+		lh.unBatchMux.Unlock()
 		// drive.foldersearchQueue.Enqueue(makeBatch(ll, ""))
 	}
 
-	atomic.AddInt32(&ls.onGoingRequests, -1)
+	atomic.AddInt32(&lh.onGoingRequests, -1)
 
 }
 
 func convFolStruct(file *googledrive.File, path string) *FoldHolder {
 	aa := new(FoldHolder)
 	aa.Name = file.Name
-	aa.MimeType = file.MimeType
 	aa.ModTime = file.ModifiedTime
 	aa.Parents = file.Parents
 	aa.Dir = path
@@ -408,16 +409,16 @@ func convFilStruct(file *googledrive.File, path string) *FileHolder {
 	return aa
 }
 
-func (ls *ListHdl) getComd() {
-	for ls.drive.isListRunning {
+func (lh *ListHdl) getComd() {
+	for lh.drive.isListRunning {
 
-		b := <-ls.commandChan
+		b := <-lh.commandChan
 		switch b {
 		case C_CANCEL:
-			ls.drive.canRunList = false
-			ls.commandChan <- S_TERM
+			lh.drive.canRunList = false
+			lh.commandChan <- S_TERM
 		default:
-			ls.commandChan <- b
+			lh.commandChan <- b
 			time.Sleep(100 * time.Millisecond) // prevent further reading
 		}
 

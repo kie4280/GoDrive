@@ -71,14 +71,27 @@ loop:
 
 func localSync() {
 	begin2 := time.Now()
-	fw1 := localfs.NewClient("/home/kie/test")
+	fw1, err := localfs.NewClient(userID)
+	log.Println(err)
 	fw2 := fw1.ListAll()
-
-	select {
-	case r := <-fw2:
-		r1, r2 := r.Folders, r.Files
-		fmt.Printf("folders: %d files: %d error: \n", r1, r2)
+loop:
+	for {
+		select {
+		case err := <-fw2.Error():
+			fmt.Println(err)
+			break loop
+		default:
+		}
+		select {
+		case r := <-fw2.Progress():
+			r1, r2 := r.Folders, r.Files
+			fmt.Printf("folders: %d files: %d\n", r1, r2)
+			if r.Done {
+				break loop
+			}
+		}
 	}
+
 	elapsed2 := time.Now().Sub(begin2).Seconds()
 	fmt.Printf("time spent: %f s\n", elapsed2)
 
@@ -141,10 +154,11 @@ func main() {
 		LocalRoot:   "/home/kie/test"})
 	defer settings.SaveDriveConfig()
 
-	watchRemote()
-	// remoteSync()
+	// watchRemote()
+	remoteSync()
 	// download()
 	// mkdir()
 	// watchLocal()
+	localSync()
 
 }

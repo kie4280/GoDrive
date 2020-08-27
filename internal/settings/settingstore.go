@@ -1,11 +1,9 @@
 package settings
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
+	"godrive/internal/utils"
 	"os"
 	"path/filepath"
 )
@@ -98,7 +96,7 @@ func (dc *DriveConfigs) GetUser(id string) (*UserConfigs, error) {
 
 // Add user to global config and return the user Id
 func (dc *DriveConfigs) Add(user *UserConfigs) string {
-	id := GetID(user.AccountName)
+	id := utils.GetMd5Sum(user.AccountName)
 	_, ok := dc.global.Users[id]
 	if !ok {
 		dc.global.Usercount++
@@ -106,13 +104,5 @@ func (dc *DriveConfigs) Add(user *UserConfigs) string {
 	}
 
 	dc.global.Users[id] = user
-	return id
-}
-
-// GetID gets the id of a particular account name
-func GetID(account string) string {
-	hash := md5.New()
-	io.WriteString(hash, account)
-	id := hex.EncodeToString(hash.Sum(nil))
 	return id
 }

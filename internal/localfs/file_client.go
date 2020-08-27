@@ -1,19 +1,18 @@
 package localfs
 
 import (
-	"bufio"
 	"crypto/md5"
-	"encoding/json"
-
-	// "fmt"
+	// "errors"
+	"encoding/hex"
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/oleiade/lane"
 	"github.com/panjf2000/ants/v2"
+	"godrive/internal/settings"
+	"godrive/internal/utils"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
-
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,36 +21,40 @@ import (
 const (
 	maxGoroutine = 10
 	minGoroutine = 2
+
+	// C_CANCEL command to cancel current operation
+	C_CANCEL int8 = 1
 )
+
+var ()
 
 // LocalClient indexes files
 type LocalClient struct {
-	progressChan    chan *Progress
-	rootDir         string
-	folderQueue     *lane.Queue
-	foldQMux        sync.Mutex
-	canRun          bool
-	filecount       int32
-	foldcount       int32
-	onGoingRequests int32
-	writeWait       sync.WaitGroup
+	rootDir    string
+	canRunList bool
+	store      *LCStore
+	userUD     string
 }
 
-// File represents a file on a filesystem
-type File struct {
-	ID      []byte
-	Name    string
-	Md5sum  []byte
-	Parents []string
-	Modtime string
-	Isdir   bool
-}
-
-// Progress of the command
-type Progress struct {
+// ListProgress of the command
+type ListProgress struct {
 	Files   int
 	Folders int
 	Done    bool
+}
+
+// ListHdl is the handle returned by ListAll
+type ListHdl struct {
+	progressChan    chan *ListProgress
+	errChan         chan error
+	commandChan     chan int8
+	local           *LocalClient
+	folderQueue     *lane.Queue
+	foldQMux        sync.Mutex
+	filecount       int32
+	foldcount       int32
+	onGoingRequests int32
+	storeW          StoreWrite
 }
 
 func checkErr(err error) {
@@ -60,34 +63,30 @@ func checkErr(err error) {
 	}
 }
 
-// Cancel the current operation
-func (fw *LocalClient) Cancel() {
-	fw.canRun = false
-}
-
 // NewClient returns a new LocalClient object
-func NewClient(rootDir string) *LocalClient {
+func NewClient(userID string) (*LocalClient, error) {
 	ws := new(LocalClient)
-	ws.rootDir = rootDir
-	ws.canRun = false
-	return ws
+	setting, err := settings.ReadDriveConfig()
+	if err != nil {
+		return nil, err
+	}
+	user, err := setting.GetUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	ws.rootDir = user.LocalRoot
+	ws.canRunList = false
+	ws.store, err = NewStore(userID)
+	if err != nil {
+		return nil, err
+	}
+	return ws, nil
 }
 
 // Hashsum returns the md5 hash of "file" with path relative to rootDir
-func (fw *LocalClient) hashsum(path string, info os.FileInfo) *File {
-	filename := filepath.Base(path)
-	abspath := filepath.Join(fw.rootDir, path)
-	relpath := filepath.Clean(path)
+func (fw *LocalClient) hashsum(relpath string) string {
 
-	if info.IsDir() {
-		h1 := md5.New()
-		io.WriteString(h1, relpath+"/")
-
-		return &File{
-			Name: filename, ID: h1.Sum(nil), Isdir: true,
-			Modtime: info.ModTime().UTC().Format(time.RFC3339)}
-
-	}
+	abspath := filepath.Join(fw.rootDir, relpath)
 	f, openerr := os.Open(abspath)
 	checkErr(openerr)
 	defer f.Close()
@@ -98,156 +97,128 @@ func (fw *LocalClient) hashsum(path string, info os.FileInfo) *File {
 		h2 := md5.New()
 		io.WriteString(h2, relpath)
 
-		return &File{
-			Name: filename, ID: h2.Sum(nil), Isdir: false, Md5sum: h1.Sum(nil),
-			Modtime: info.ModTime().UTC().Format(time.RFC3339)}
+		return hex.EncodeToString(h1.Sum(nil))
 	}
 
-	return nil
+	return ""
 
 }
 
 // ListAll lists the folders and files below "location"
-func (fw *LocalClient) ListAll() chan *Progress {
-	fw.progressChan = make(chan *Progress, 10)
-	go fw.listAll()
-	return fw.progressChan
+func (fw *LocalClient) ListAll() *ListHdl {
+	lh := new(ListHdl)
+	lh.progressChan = make(chan *ListProgress, 5)
+	lh.commandChan = make(chan int8)
+	lh.errChan = make(chan error, 5)
+	lh.local = fw
+	go lh.listAll()
+	return lh
 }
 
-func (fw *LocalClient) listAll() {
-	p, errP := ants.NewPoolWithFunc(maxGoroutine, fw.recursiveFoldsearch)
-	if errP != nil {
-		log.Fatalf("There is a problem starting goroutines: %v", errP)
-	}
+func (lh *ListHdl) listAll() {
+	defer lh.onListError()
+	p, err := ants.NewPoolWithFunc(maxGoroutine, lh.recursiveFoldsearch)
+	checkErr(err)
 	defer p.Release()
-	fw.onGoingRequests = 0
-	fw.filecount, fw.foldcount = 0, 0
-	fw.folderQueue = lane.NewQueue()
-	fw.canRun = true
-	var foldChan chan *File = make(chan *File, 10000)
-	var fileChan chan *File = make(chan *File, 10000)
-
-	go fw.writeFiles("folders.json", foldChan)
-	go fw.writeFiles("files.json", fileChan)
-	fw.writeWait.Add(2)
-
-	fol, listErr := ioutil.ReadDir(fw.rootDir)
-	if listErr != nil {
-		log.Fatalf("Cannot read directory: %v", listErr)
-	}
-	for _, i := range fol {
-		if i.Name() != ".GoDrive" {
-
-			if i.IsDir() {
-				fw.folderQueue.Enqueue("/" + i.Name())
-				foldChan <- fw.hashsum("/"+i.Name(), i)
-			} else {
-				fileChan <- fw.hashsum("/"+i.Name(), i)
-			}
-
-		}
-
-	}
+	lh.storeW, err = lh.local.store.AcquireWrite(true)
+	checkErr(err)
+	defer lh.storeW.Release()
+	lh.onGoingRequests = 0
+	lh.filecount, lh.foldcount = 0, 0
+	lh.folderQueue = lane.NewQueue()
+	lh.local.canRunList = true
 
 	var workDone bool = false
+	lh.folderQueue.Enqueue("/")
+	progTimer := time.Now()
 
-	for !workDone && fw.canRun {
+	for !workDone && lh.local.canRunList {
 
-		if p.Free() > 0 && !fw.folderQueue.Empty() {
-			atomic.AddInt32(&fw.onGoingRequests, 1)
-
-			checkErr(p.Invoke([3]interface{}{foldChan, fileChan,
-				fw.folderQueue.Dequeue()}))
+		if p.Free() > 0 && !lh.folderQueue.Empty() {
+			atomic.AddInt32(&lh.onGoingRequests, 1)
+			checkErr(p.Invoke([1]interface{}{lh.folderQueue.Dequeue()}))
 
 		} else {
 			time.Sleep(10 * time.Millisecond) // lighten load for CPU
 		}
 
-		workDone = fw.folderQueue.Empty() &&
-			atomic.LoadInt32(&fw.onGoingRequests) == 0
+		workDone = lh.folderQueue.Empty() &&
+			atomic.LoadInt32(&lh.onGoingRequests) == 0
+		if time.Now().Sub(progTimer).Milliseconds() >= 1000 {
+			if len(lh.progressChan) >= 4 {
+				<-lh.progressChan
+			}
+			lh.progressChan <- &ListProgress{
+				Files:   int(atomic.LoadInt32(&lh.filecount)),
+				Folders: int(atomic.LoadInt32(&lh.foldcount)), Done: false}
+			progTimer = time.Now()
+		}
 
 	}
-
-	fw.writeWait.Wait()
-	fw.progressChan <- &Progress{Files: int(fw.filecount), Folders: int(fw.foldcount),
+	lh.local.store.Save("folders.json", "files.json", "idmap.json")
+	lh.progressChan <- &ListProgress{Files: int(lh.filecount), Folders: int(lh.foldcount),
 		Done: true}
 
 }
 
-func (fw *LocalClient) recursiveFoldsearch(args interface{}) {
-	unpackArgs := args.([3]interface{})
-	writeFold := unpackArgs[0].(chan *File)
-	writeFile := unpackArgs[1].(chan *File)
-	_ = writeFile
-	_ = writeFold
-	folderRel, ok := unpackArgs[2].(string)
+func (lh *ListHdl) recursiveFoldsearch(args interface{}) {
+	unpackArgs := args.([1]interface{})
+	folderRel, ok := unpackArgs[0].(string)
 	if !ok {
-		atomic.AddInt32(&fw.onGoingRequests, -1)
+		atomic.AddInt32(&lh.onGoingRequests, -1)
 		return
 	}
-	folderAbs := filepath.Join(fw.rootDir, folderRel)
+	folderAbs := filepath.Join(lh.local.rootDir, folderRel)
 	folders, err := ioutil.ReadDir(folderAbs)
 	checkErr(err)
-	if err != nil {
-		return
-	}
+
 	for _, fol := range folders {
-		dirpath := filepath.Join(folderRel, fol.Name())
+		relpath := filepath.Join(folderRel, fol.Name())
 		if fol.IsDir() {
 
-			fw.folderQueue.Enqueue(dirpath)
-			writeFold <- fw.hashsum(dirpath, fol)
-			atomic.AddInt32(&fw.foldcount, 1)
+			lh.folderQueue.Enqueue(relpath)
+			aa := new(FoldHolder)
+			aa.ModTime = fol.ModTime().UTC().Format(time.RFC3339)
+			aa.Dir = folderRel
+			aa.Name = fol.Name()
+			lh.storeW.WriteFold(utils.GetMd5Sum(relpath), aa, true)
+			atomic.AddInt32(&lh.foldcount, 1)
 		} else {
-			writeFile <- fw.hashsum(dirpath, fol)
-			atomic.AddInt32(&fw.filecount, 1)
-		}
-	}
 
-	atomic.AddInt32(&fw.onGoingRequests, -1)
-}
-
-func (fw *LocalClient) writeFiles(filename string, outchan chan *File) {
-	foldpath := filepath.Join(fw.rootDir, ".GoDrive", "local")
-	errMk := os.MkdirAll(foldpath, 0777)
-	checkErr(errMk)
-
-	file, err := os.Create(filepath.Join(foldpath, filename))
-	checkErr(err)
-	writer := bufio.NewWriter(file)
-	defer file.Close()
-
-	_, err1 := writer.WriteString("[")
-	checkErr(err1)
-	var i *File
-	var ok bool = true
-	i, ok = <-outchan
-	for fw.canRun && ok {
-
-		if i != nil {
-			mr, marErr := json.Marshal(i)
-			_, writeErr := writer.WriteString(string(mr))
-			checkErr(marErr)
-			checkErr(writeErr)
-		}
-		i, ok = <-outchan
-		if ok {
-			e, err := writer.WriteString(",\n")
-			_ = e
+			aa := new(FileHolder)
+			aa.ModTime = fol.ModTime().UTC().Format(time.RFC3339)
+			aa.Dir = folderRel
+			aa.Name = fol.Name()
+			aa.Md5Chk = lh.local.hashsum(relpath)
+			mime, err := mimetype.DetectFile(filepath.Join(folderAbs, fol.Name()))
 			checkErr(err)
+			aa.MimeType = mime.String()
+			lh.storeW.WriteFile(utils.GetMd5Sum(relpath), aa, true)
+			atomic.AddInt32(&lh.filecount, 1)
 		}
-
 	}
 
-	_, err2 := writer.WriteString("]")
-	checkErr(err2)
-	err3 := writer.Flush()
-	checkErr(err3)
-	fw.writeWait.Done()
-
+	atomic.AddInt32(&lh.onGoingRequests, -1)
 }
 
-func (fw *LocalClient) createFolderStructure() {
-	foldpath := filepath.Join(fw.rootDir, ".GoDrive", "local", "folders.json")
-	_ = foldpath
+// Progress returns the progress channel
+func (lh *ListHdl) Progress() <-chan *ListProgress {
+	return lh.progressChan
+}
+
+// Error returns the error channel
+func (lh *ListHdl) Error() <-chan error {
+	return lh.errChan
+}
+
+// SendComd sends command to
+func (lh *ListHdl) SendComd() {
+	lh.local.canRunList = false
+}
+
+func (lh *ListHdl) onListError() {
+	if err := recover(); err != nil {
+		err1 := err.(error)
+		lh.errChan <- err1
+	}
 }

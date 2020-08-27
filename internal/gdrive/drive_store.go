@@ -79,11 +79,10 @@ type FileHolder struct {
 
 // FoldHolder holds a folder
 type FoldHolder struct {
-	Name     string
-	MimeType string
-	ModTime  string
-	Parents  []string
-	Dir      string
+	Name    string
+	ModTime string
+	Parents []string
+	Dir     string
 }
 
 // NewStore new drive state storage
@@ -298,21 +297,25 @@ func (al *AccessLock) DeleteIDMap(path string, blocking bool) error {
 	return nil
 }
 
-// AcquireWrite acquires write to the resource specified
-// by "resource" returns (id, error). This is used to indicate
-// the drive state is under heavy modification
-func (gs *GDStore) AcquireWrite() (StoreWrite, error) {
+// AcquireWrite acquires write to the resource.
+// args: (blocking: block if set to true, otherwise return ErrInUse
+// if drive state is under heavy modification)
+func (gs *GDStore) AcquireWrite(blocking bool) (StoreWrite, error) {
 
 	gs.accessCond.L.Lock()
 	defer gs.accessCond.L.Unlock()
-	if gs.accessID == -1 {
-		al := new(AccessLock)
-		al.id = gs.getNewID()
-		al.gs = gs
-		gs.accessID = al.id
-		return al, nil
+	for gs.accessID != -1 {
+		if !blocking {
+			return nil, ErrInUse
+		}
+		gs.accessCond.Wait()
 	}
-	return nil, ErrInUse
+
+	al := new(AccessLock)
+	al.id = gs.getNewID()
+	al.gs = gs
+	gs.accessID = al.id
+	return al, nil
 
 }
 
