@@ -6,27 +6,48 @@ import (
 	"godrive/internal/utils"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
-// DriveConfigs contains all the possible settings
-type DriveConfigs struct {
-	global *GlobalConfig
+/*
+This setting store is safe for concurrent reads and writes.
+This is where the settings for the whole program is stored.
+
+*/
+
+// DriveConfig contains all the possible settings
+type DriveConfig interface {
+	Add(string, string) string
+	ListIDs() []string
+	GetUser(string) (UserConfig, error)
+	Delete(string)
 }
 
-// GlobalConfig stores to json in this format
-type GlobalConfig struct {
+// UserConfig is the interface returned by GetUser
+type UserConfig interface {
+	GetAccountName() string
+	GetLocalRoot() string
+	IsIgnored(string) bool
+}
+
+// Global stores to json in this format
+type Global struct {
 	Usercount  int
 	AccountIDs []string
-	Users      map[string]*UserConfigs
+	Users      map[string]*User
+	globalLock sync.Mutex
 }
 
-// UserConfigs contains the setting of a particular user
-type UserConfigs struct {
+// User contains the setting of a particular user
+type User struct {
 	AccountName string
 	LocalRoot   string
+	Excluded    []string
+	userLock    sync.Mutex
 }
 
-var driveconfig *DriveConfigs = nil
+var globalConfig *Global = nil
+var fileLock sync.Mutex
 
 var (
 	// ErrNoSuchUser means the user is deleted
@@ -34,10 +55,11 @@ var (
 )
 
 // ReadDriveConfig reads the google drive configs from the config file
-func ReadDriveConfig() (*DriveConfigs, error) {
-
-	if driveconfig != nil {
-		return driveconfig, nil
+func ReadDriveConfig() (DriveConfig, error) {
+	fileLock.Lock()
+	defer fileLock.Unlock()
+	if globalConfig != nil {
+		return globalConfig, nil
 	}
 	homedir, err := os.UserHomeDir()
 
@@ -49,45 +71,53 @@ func ReadDriveConfig() (*DriveConfigs, error) {
 	defer file.Close()
 	if err != nil {
 		if os.IsNotExist(err) {
-			config := new(GlobalConfig)
+			config := new(Global)
 			config.Usercount = 0
-			config.Users = make(map[string]*UserConfigs)
-			driveconfig = &DriveConfigs{global: config}
-			return driveconfig, nil
+			config.Users = make(map[string]*User)
+			globalConfig = config
+			return config, nil
 		}
 
 		return nil, err
 	}
-	config := new(GlobalConfig)
+	config := new(Global)
 	err = json.NewDecoder(file).Decode(config)
-	out := new(DriveConfigs)
-	out.global = config
-	driveconfig = out
+	out := new(Global)
+	globalConfig = out
 	return out, err
 }
 
 // SaveDriveConfig saves the configuration of a user to file
 func SaveDriveConfig() error {
+	fileLock.Lock()
+	defer fileLock.Unlock()
 	homedir, err := os.UserHomeDir()
 	if err != nil {
 		panic(err)
 	}
-	configPath := filepath.Join(homedir, ".GoDrive", "driveconfig.json")
-	os.MkdirAll(filepath.Join(homedir, ".GoDrive"), 0777)
+	configPath := filepath.Join(homedir, ".GoDrive", "globalConfig.json")
+	err = os.MkdirAll(filepath.Join(homedir, ".GoDrive"), 0777)
+	if err != nil {
+		return err
+	}
 	file, err := os.Create(configPath)
+	if err != nil {
+		return err
+	}
 	defer file.Close()
-	err = json.NewEncoder(file).Encode(driveconfig.global)
+	err = json.NewEncoder(file).Encode(globalConfig)
+	globalConfig = nil
 	return err
 }
 
 // ListIDs the user names
-func (dc *DriveConfigs) ListIDs() []string {
-	return dc.global.AccountIDs
+func (gc *Global) ListIDs() []string {
+	return gc.AccountIDs
 }
 
 // GetUser the user with "id"
-func (dc *DriveConfigs) GetUser(id string) (*UserConfigs, error) {
-	ur, ok := dc.global.Users[id]
+func (gc *Global) GetUser(id string) (UserConfig, error) {
+	ur, ok := gc.Users[id]
 	if !ok {
 		return nil, ErrNoSuchUser
 	}
@@ -95,14 +125,49 @@ func (dc *DriveConfigs) GetUser(id string) (*UserConfigs, error) {
 }
 
 // Add user to global config and return the user Id
-func (dc *DriveConfigs) Add(user *UserConfigs) string {
-	id := utils.GetMd5Sum(user.AccountName)
-	_, ok := dc.global.Users[id]
+func (gc *Global) Add(account string, localRoot string) string {
+	id := utils.StringToMd5(account)
+	gc.globalLock.Lock()
+	defer gc.globalLock.Unlock()
+	_, ok := gc.Users[id]
 	if !ok {
-		dc.global.Usercount++
-		dc.global.AccountIDs = append(dc.global.AccountIDs, id)
+		gc.Usercount++
+		gc.AccountIDs = append(gc.AccountIDs, id)
+		cc := new(User)
+		cc.AccountName = account
+		cc.LocalRoot = localRoot
+		gc.Users[id] = cc
 	}
 
-	dc.global.Users[id] = user
 	return id
+}
+
+// Delete a user
+func (gc *Global) Delete(id string) {
+	gc.globalLock.Lock()
+	defer gc.globalLock.Unlock()
+	delete(gc.Users, id)
+	for i, a := range gc.AccountIDs {
+		if a == id {
+			gc.AccountIDs = append(gc.AccountIDs[0:i],
+				gc.AccountIDs[i+i:]...)
+			break
+		}
+	}
+	gc.Usercount--
+}
+
+// GetAccountName gets account name
+func (uc *User) GetAccountName() string {
+	return uc.AccountName
+}
+
+// GetLocalRoot gets local root
+func (uc *User) GetLocalRoot() string {
+	return uc.LocalRoot
+}
+
+// IsIgnored returns whether the file or folder is ignored
+func (uc *User) IsIgnored(path string) bool {
+	return false
 }

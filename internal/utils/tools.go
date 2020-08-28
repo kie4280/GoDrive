@@ -4,6 +4,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"io"
+	"os"
+	"path/filepath"
 )
 
 /*
@@ -42,10 +44,29 @@ func NewError(outer error, inner error) error {
 This is the utility section, containing all kinds of utilities.
 */
 
-// GetMd5Sum gets the id of a particular account name
-func GetMd5Sum(str string) string {
+// StringToMd5 gets the id of a particular account name
+func StringToMd5(str string) string {
 	hash := md5.New()
 	io.WriteString(hash, str)
 	id := hex.EncodeToString(hash.Sum(nil))
 	return id
+}
+
+// CheckSum generates the md5 sum for "file"
+func CheckSum(file string) (string, error) {
+	abspath := filepath.Clean(file)
+	f, openerr := os.Open(abspath)
+	defer f.Close()
+	if openerr != nil {
+		return "", openerr
+	}
+
+	h1 := md5.New()
+	_, copyerr := io.Copy(h1, f)
+	if copyerr != nil {
+		return "", copyerr
+	}
+
+	return hex.EncodeToString(h1.Sum(nil)), nil
+
 }

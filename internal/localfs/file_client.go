@@ -1,17 +1,14 @@
 package localfs
 
 import (
-	"crypto/md5"
+
 	// "errors"
-	"encoding/hex"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/oleiade/lane"
 	"github.com/panjf2000/ants/v2"
 	"godrive/internal/settings"
 	"godrive/internal/utils"
-	"io"
 	"io/ioutil"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -26,14 +23,47 @@ const (
 	C_CANCEL int8 = 1
 )
 
-var ()
-
 // LocalClient indexes files
 type LocalClient struct {
 	rootDir    string
 	canRunList bool
 	store      *LCStore
 	userUD     string
+}
+
+func checkErr(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+// NewClient returns a new LocalClient object
+func NewClient(userID string) (*LocalClient, error) {
+	ws := new(LocalClient)
+	setting, err := settings.ReadDriveConfig()
+	if err != nil {
+		return nil, err
+	}
+	user, err := setting.GetUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	ws.rootDir = user.GetLocalRoot()
+	ws.canRunList = false
+	ws.store, err = NewStore(userID)
+	if err != nil {
+		return nil, err
+	}
+	return ws, nil
+}
+
+// Hashsum returns the md5 hash of "file" with path relative to rootDir
+func (fw *LocalClient) hashsum(relpath string) string {
+
+	abspath := filepath.Join(fw.rootDir, relpath)
+	check, err := utils.CheckSum(abspath)
+	checkErr(err)
+	return check
 }
 
 // ListProgress of the command
@@ -55,53 +85,6 @@ type ListHdl struct {
 	foldcount       int32
 	onGoingRequests int32
 	storeW          StoreWrite
-}
-
-func checkErr(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
-
-// NewClient returns a new LocalClient object
-func NewClient(userID string) (*LocalClient, error) {
-	ws := new(LocalClient)
-	setting, err := settings.ReadDriveConfig()
-	if err != nil {
-		return nil, err
-	}
-	user, err := setting.GetUser(userID)
-	if err != nil {
-		return nil, err
-	}
-	ws.rootDir = user.LocalRoot
-	ws.canRunList = false
-	ws.store, err = NewStore(userID)
-	if err != nil {
-		return nil, err
-	}
-	return ws, nil
-}
-
-// Hashsum returns the md5 hash of "file" with path relative to rootDir
-func (fw *LocalClient) hashsum(relpath string) string {
-
-	abspath := filepath.Join(fw.rootDir, relpath)
-	f, openerr := os.Open(abspath)
-	checkErr(openerr)
-	defer f.Close()
-	if openerr == nil {
-		h1 := md5.New()
-		_, copyerr := io.Copy(h1, f)
-		checkErr(copyerr)
-		h2 := md5.New()
-		io.WriteString(h2, relpath)
-
-		return hex.EncodeToString(h1.Sum(nil))
-	}
-
-	return ""
-
 }
 
 // ListAll lists the folders and files below "location"
@@ -181,7 +164,7 @@ func (lh *ListHdl) recursiveFoldsearch(args interface{}) {
 			aa.ModTime = fol.ModTime().UTC().Format(time.RFC3339)
 			aa.Dir = folderRel
 			aa.Name = fol.Name()
-			lh.storeW.WriteFold(utils.GetMd5Sum(relpath), aa, true)
+			lh.storeW.WriteFold(relpath+"/", aa, true)
 			atomic.AddInt32(&lh.foldcount, 1)
 		} else {
 
@@ -193,7 +176,7 @@ func (lh *ListHdl) recursiveFoldsearch(args interface{}) {
 			mime, err := mimetype.DetectFile(filepath.Join(folderAbs, fol.Name()))
 			checkErr(err)
 			aa.MimeType = mime.String()
-			lh.storeW.WriteFile(utils.GetMd5Sum(relpath), aa, true)
+			lh.storeW.WriteFile(relpath, aa, true)
 			atomic.AddInt32(&lh.filecount, 1)
 		}
 	}

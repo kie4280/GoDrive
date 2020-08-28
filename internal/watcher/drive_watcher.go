@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	listFields = "nextPageToken, newStartPageToken, changes(changeType, time," +
-		" removed, file(id, name, mimeType, modifiedTime, md5Checksum, parents))"
+	listFields = "nextPageToken, newStartPageToken, changes(changeType, time, " +
+		"removed, fileId, file(name, mimeType, modifiedTime, md5Checksum, parents))"
 )
 
 // DriveWatcher watcher struct

@@ -32,3 +32,11 @@ func (sy *SyncST) initialCheck() error {
 
 	return nil
 }
+
+func (sy *SyncST) Download() error {
+	return nil
+}
+
+func (sy *SyncST) Upload() error {
+	return nil
+}

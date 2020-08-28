@@ -97,7 +97,7 @@ func NewClient(id string) (*DriveClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	client.localRoot = local.LocalRoot
+	client.localRoot = local.GetLocalRoot()
 
 	store, err := NewStore(id)
 	if err != nil {
@@ -161,7 +161,7 @@ func (lh *ListHdl) SendComd(command int8) error {
 		}
 	}
 
-	return ErrJammed
+	return ErrNoResponse
 
 }
 
@@ -217,7 +217,6 @@ func (lh *ListHdl) listAll() {
 	lh.drive.isListRunning = true
 	lh.onGoingRequests = 0
 	lh.requestInterv = 20
-
 	lh.onGoingRequests = 0
 	lh.foldersearchQueue = lane.NewQueue()
 	lh.folderUnbatchSlice = make([]string, 0, batchSize)
@@ -291,7 +290,7 @@ func (lh *ListHdl) listAll() {
 		lh.unBatchMux.Unlock()
 
 	}
-
+	lh.drive.store.Save("folders.json", "files.json", "foldIDMaps.json")
 	lh.progressChan <- &ListProgress{Files: int(lh.filecount),
 		Folders: int(lh.foldcount), Done: lh.drive.canRunList}
 

@@ -102,7 +102,15 @@ func getChange(d *watcher.DriveWatcher) {
 
 	if e == nil {
 		for _, i := range changes {
-			fmt.Printf("change: %v %v %v %v\n", i.Time, i.File.Name, i.File.Id, i.File.Parents)
+			if !i.Removed {
+				fmt.Printf("change: %v %v %v %v %v\n", i.Time,
+					i.File.Name, i.FileId, i.File.Parents,
+					i.ChangeType)
+			} else {
+				fmt.Printf("change: %v %v %v\n", i.Time,
+					i.ChangeType, i.FileId)
+			}
+
 		}
 	} else {
 		log.Fatalf("getchange error: %v\n", e)
@@ -141,7 +149,7 @@ func watchLocal() {
 		log.Fatalln(err)
 	}
 	defer lw.Close()
-
+	time.Sleep(1000 * time.Second)
 }
 
 var userID string
@@ -149,16 +157,15 @@ var userID string
 func main() {
 	config, err := settings.ReadDriveConfig()
 	fmt.Printf("setting error: %v\n", err)
-	userID = config.Add(&settings.UserConfigs{
-		AccountName: "duckfat0000@gmail.com",
-		LocalRoot:   "/home/kie/test"})
+	userID = config.Add("duckfat0000@gmail.com",
+		"/home/kie/test")
 	defer settings.SaveDriveConfig()
 
 	// watchRemote()
-	remoteSync()
+	// remoteSync()
 	// download()
 	// mkdir()
-	// watchLocal()
-	localSync()
+	watchLocal()
+	// localSync()
 
 }

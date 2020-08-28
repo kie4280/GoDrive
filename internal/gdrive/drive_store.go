@@ -108,7 +108,7 @@ func NewStore(id string) (*GDStore, error) {
 		drivestore[id] = gs
 	}
 
-	gs.localRoot = local.LocalRoot
+	gs.localRoot = local.GetLocalRoot()
 	gs.userID = id
 
 	return gs, nil
@@ -405,16 +405,16 @@ func (gs *GDStore) writeFolds(foldList string, foldIDmap string) {
 
 // Save the current drive state to the files as (foldList, fileList, foldIDMap)
 func (gs *GDStore) Save(foldList string, fileList string, foldIDMap string) {
+	gs.accessMux.Lock()
+	defer gs.accessMux.Unlock()
 	if gs.isSaving {
 		return
 	}
 	gs.isSaving = true
-	go func() {
-		defer func() {
-			gs.isSaving = false
-		}()
-		gs.writeFiles(fileList)
-		gs.writeFolds(foldList, foldIDMap)
-
+	defer func() {
+		gs.isSaving = false
 	}()
+	gs.writeFiles(fileList)
+	gs.writeFolds(foldList, foldIDMap)
+
 }

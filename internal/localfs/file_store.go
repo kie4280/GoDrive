@@ -108,7 +108,7 @@ func NewStore(id string) (*LCStore, error) {
 		drivestore[id] = gs
 	}
 
-	gs.localRoot = local.LocalRoot
+	gs.localRoot = local.GetLocalRoot()
 	gs.userID = id
 
 	return gs, nil
