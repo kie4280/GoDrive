@@ -12,7 +12,7 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"runtime/debug"
 	"strings"
@@ -36,17 +36,14 @@ const (
 
 	// S_ACK state ACK received
 	S_ACK int8 = -1
-	// S_TERM state terminated
-	S_TERM int8 = -2
 	// S_RUNNING state running
-	S_RUNNING int8 = -3
+	S_RUNNING int8 = -2
 )
 
 var (
-	// ErrJammed is the error thrown when the channel is jammed
-	ErrJammed = errors.New("The channel is jammed")
-	// ErrCanceled is the error thrown when the operation is canceled
-	ErrCanceled = errors.New("The operation is canceled")
+
+	// ErrTerminated is the error thrown when the operation is canceled
+	ErrTerminated = errors.New("The operation is already terminated")
 	// ErrNoResponse is the error thrown when the command does return
 	// ACK before timeout
 	ErrNoResponse = errors.New("There is no response from the receiver")
@@ -61,6 +58,7 @@ type DriveClient struct {
 	store               *GDStore
 	userRateLimitExceed *regexp.Regexp
 	userID              string
+	user                settings.UserConfig
 }
 
 type foldBatch struct {
@@ -93,11 +91,11 @@ func NewClient(id string) (*DriveClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	local, err := set.GetUser(id)
+	client.user, err = set.GetUser(id)
 	if err != nil {
 		return nil, err
 	}
-	client.localRoot = local.GetLocalRoot()
+	client.localRoot = client.user.GetLocalRoot()
 
 	store, err := NewStore(id)
 	if err != nil {
@@ -113,8 +111,8 @@ func NewClient(id string) (*DriveClient, error) {
 func (lh *ListHdl) onListError() {
 	if err := recover(); err != nil {
 		err1 := err.(error)
-		err1 = fmt.Errorf("%w\n%s", err1, string(debug.Stack()))
-		lh.errChan <- fmt.Errorf("DriveClient list error\n%w", err1)
+		err1 = utils.NewError(err1, errors.New(string(debug.Stack())))
+		lh.errChan <- utils.NewError(errors.New("DriveClient list error"), err1)
 	}
 }
 
@@ -130,6 +128,7 @@ type ListHdl struct {
 	progressChan       chan *ListProgress
 	errChan            chan error
 	commandChan        chan int8
+	replyChan          chan int8
 	drive              *DriveClient
 	storeW             StoreWrite
 	foldersearchQueue  *lane.Queue
@@ -143,15 +142,25 @@ type ListHdl struct {
 
 // SendComd sends command to ListAll. Returns error
 func (lh *ListHdl) SendComd(command int8) error {
+	if !lh.drive.isListRunning {
+		return ErrTerminated
+	}
 	start := time.Now()
 	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
 		select {
 		case lh.commandChan <- command:
+			return nil
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	start = time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case response := <-lh.replyChan:
 
-			a := <-lh.commandChan
-			switch a {
-			case S_TERM:
-				lh.commandChan <- S_TERM
+			switch response {
+
 			case S_ACK:
 			}
 
@@ -179,42 +188,35 @@ func (lh *ListHdl) Error() <-chan error {
 func (drive *DriveClient) ListAll() *ListHdl {
 	if drive.isListRunning {
 		return nil
-	}
-	progressChan := make(chan *ListProgress, 5)
-	commandChan := make(chan int8)
-	errChan := make(chan error, 5)
 
+	}
 	result := new(ListHdl)
-	result.progressChan = progressChan
-	result.commandChan = commandChan
-	result.errChan = errChan
+	result.progressChan = make(chan *ListProgress, 5)
+	result.errChan = make(chan error, 5)
+	result.commandChan = make(chan int8)
+	result.replyChan = make(chan int8)
 	result.drive = drive
 	go result.listAll()
 	return result
 }
 
 func (lh *ListHdl) listAll() {
-
-	p, errP := ants.NewPoolWithFunc(maxGoroutine, lh.recursiveFoldSearch)
-	if errP != nil {
-		log.Fatalf("There is a problem starting goroutine pool: %v", errP)
-	}
-
-	defer p.Release()
 	defer lh.onListError()
+	lh.drive.isListRunning = true
+	p, errP := ants.NewPoolWithFunc(maxGoroutine, lh.recursiveFoldSearch)
+	checkErr(errP)
+	defer p.Release()
 
 	var err error
-
 	lh.storeW, err = lh.drive.store.AcquireWrite(true)
 	checkErr(err)
 	defer func() {
-		err = lh.storeW.Release()
+		err := lh.storeW.Release()
 		checkErr(err)
 		lh.drive.isListRunning = false
 		lh.drive.canRunList = false
 	}()
 	lh.drive.canRunList = true
-	lh.drive.isListRunning = true
 	lh.onGoingRequests = 0
 	lh.requestInterv = 20
 	lh.onGoingRequests = 0
@@ -351,7 +353,7 @@ func (lh *ListHdl) recursiveFoldSearch(args interface{}) {
 			lh.storeW.WriteIDMap("/", r.Files[0].Parents[0], true)
 
 		} else {
-			parentPath = filepath.Join(fol.Dir, fol.Name)
+			parentPath = path.Join(fol.Dir, fol.Name)
 		}
 
 	}
@@ -362,7 +364,7 @@ func (lh *ListHdl) recursiveFoldSearch(args interface{}) {
 			ll = append(ll, file.Id)
 
 			lh.storeW.WriteFold(file.Id, convFolStruct(file, parentPath), true)
-			err := lh.storeW.WriteIDMap(filepath.Join(parentPath,
+			err := lh.storeW.WriteIDMap(path.Join(parentPath,
 				file.Name), file.Id, true)
 			_ = err
 			atomic.AddInt32(&lh.foldcount, 1)
@@ -415,7 +417,9 @@ func (lh *ListHdl) getComd() {
 		switch b {
 		case C_CANCEL:
 			lh.drive.canRunList = false
-			lh.commandChan <- S_TERM
+			lh.commandChan <- S_ACK
+		case C_QUERY:
+			lh.replyChan <- S_ACK
 		default:
 			lh.commandChan <- b
 			time.Sleep(100 * time.Millisecond) // prevent further reading
@@ -467,6 +471,39 @@ func (dl *DownloadHdl) onDLError() {
 	}
 }
 
+// SendComd sends commands to Download worker
+func (dl *DownloadHdl) SendComd(command int8) error {
+	if !dl.isRunning {
+		return ErrTerminated
+	}
+	start := time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case dl.commandChan <- command:
+			return nil
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	start = time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case response := <-dl.replyChan:
+
+			switch response {
+
+			case S_ACK:
+			}
+
+			return nil
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	return ErrNoResponse
+}
+
 func (ul *UploadHdl) onULError() {
 	if err := recover(); err != nil {
 		err1 := err.(error)
@@ -474,14 +511,49 @@ func (ul *UploadHdl) onULError() {
 	}
 }
 
+// SendComd sends commands to upload worker
+func (ul *UploadHdl) SendComd(command int8) error {
+	if !ul.isRunning {
+		return ErrTerminated
+	}
+	start := time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case ul.commandChan <- command:
+			return nil
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	start = time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case response := <-ul.replyChan:
+
+			switch response {
+
+			case S_ACK:
+			}
+
+			return nil
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	return ErrNoResponse
+}
+
 // DownloadHdl is the handle returned by Download
 type DownloadHdl struct {
 	downloadProgChan chan *UDLProgress
 	errChan          chan error
 	commandChan      chan int8
+	replyChan        chan int8
 	fileID           string
 	dest             string
 	drive            *DriveClient
+	isRunning        bool
 }
 
 // Download a file
@@ -496,13 +568,16 @@ func (drive *DriveClient) Download(fileID string, dest string) *DownloadHdl {
 	dd.fileID = fileID
 	dd.dest = dest
 	dd.drive = drive
+	dd.isRunning = true
 	go dd.download()
 	return dd
 }
 
 func (dl *DownloadHdl) download() {
-
 	defer dl.onDLError()
+	defer func() {
+		dl.isRunning = false
+	}()
 	info, errI := dl.drive.service.Files.Get(dl.fileID).
 		Fields("name, size, mimeType").Do()
 	checkErr(errI)
@@ -511,8 +586,8 @@ func (dl *DownloadHdl) download() {
 		AcknowledgeAbuse(false).Download()
 	checkErr(errD)
 	defer res.Body.Close()
-	path := filepath.Join(dl.drive.localRoot, dl.dest, info.Name)
-	file, filerr := os.Create(path)
+	filePath := path.Join(dl.drive.localRoot, dl.dest, info.Name)
+	file, filerr := os.Create(filePath)
 	checkErr(filerr)
 	defer file.Close()
 	wc := &writeCounter{
@@ -520,7 +595,7 @@ func (dl *DownloadHdl) download() {
 		accu:       0,
 		prog:       dl.downloadProgChan}
 	_, errC := io.Copy(file, io.TeeReader(res.Body, wc))
-	if !errors.Is(errC, ErrCanceled) {
+	if !errors.Is(errC, ErrTerminated) {
 		checkErr(errC)
 	}
 
@@ -533,31 +608,34 @@ type UploadHdl struct {
 	uploadProgChan chan *UDLProgress
 	errChan        chan error
 	commandChan    chan int8
+	replyChan      chan int8
 	metadata       *googledrive.File
-	path           string
+	dest           string
 	drive          *DriveClient
+	isRunning      bool
 }
 
 // Upload a file
-func (drive *DriveClient) Upload(metadata *googledrive.File, path string) *UploadHdl {
-	ch := make(chan *UDLProgress, 5)
-	errChan := make(chan error, 5)
-	comd := make(chan int8)
+func (drive *DriveClient) Upload(metadata *googledrive.File, target string) *UploadHdl {
 	ul := new(UploadHdl)
-	ul.uploadProgChan = ch
-	ul.errChan = errChan
-	ul.commandChan = comd
+	ul.uploadProgChan = make(chan *UDLProgress, 5)
+	ul.errChan = make(chan error, 5)
+	ul.commandChan = make(chan int8)
+	ul.replyChan = make(chan int8)
 	ul.drive = drive
-	ul.path = path
+	ul.dest = target
 	ul.metadata = metadata
+	ul.isRunning = true
 	go ul.upload()
 	return ul
 }
 
 func (ul *UploadHdl) upload() {
-
 	defer ul.onULError()
-	content, errOpen := os.Open(filepath.Join(ul.drive.localRoot, ul.path))
+	defer func() {
+		ul.isRunning = false
+	}()
+	content, errOpen := os.Open(path.Join(ul.drive.localRoot, ul.dest))
 	checkErr(errOpen)
 	stat, errStat := content.Stat()
 	checkErr(errStat)
@@ -566,7 +644,7 @@ func (ul *UploadHdl) upload() {
 		prog: ul.uploadProgChan}
 	file, err := ul.drive.service.Files.Create(ul.metadata).
 		EnforceSingleParent(true).Media(io.TeeReader(content, wc)).Do()
-	if !errors.Is(err, ErrCanceled) {
+	if !errors.Is(err, ErrTerminated) {
 		checkErr(err)
 	}
 
@@ -587,22 +665,22 @@ func onMkdirError(ch chan *MkDirProgress) {
 }
 
 // MkdirAll mkdir recursively
-func (drive *DriveClient) MkdirAll(path string) chan *MkDirProgress {
+func (drive *DriveClient) MkdirAll(target string) chan *MkDirProgress {
 	var ch chan *MkDirProgress = make(chan *MkDirProgress, 10)
-	go drive.mkdirall(path, ch)
+	go drive.mkdirall(target, ch)
 	return ch
 }
 
-func (drive *DriveClient) mkdirall(path string, ch chan *MkDirProgress) {
+func (drive *DriveClient) mkdirall(target string, ch chan *MkDirProgress) {
 	defer close(ch)
 	defer onMkdirError(ch)
 
 	var par []string
-	ss := strings.Split(filepath.Dir(path), "/")[1:]
+	ss := strings.Split(path.Dir(target), "/")[1:]
 	if len(ss) > 1 || (len(ss) == 1 && ss[0] != "") {
 		par = ss
 	}
-	dirname := filepath.Base(path)
+	dirname := path.Base(target)
 	d := &googledrive.File{
 		Name:     dirname,
 		MimeType: "application/vnd.google-apps.folder",

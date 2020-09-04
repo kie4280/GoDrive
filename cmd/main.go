@@ -2,13 +2,15 @@ package main
 
 import (
 	"errors"
-	"fmt"
+
 	"godrive/internal/gdrive"
 	"godrive/internal/googleclient"
 	"godrive/internal/localfs"
 	"godrive/internal/settings"
 	"godrive/internal/watcher"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"time"
 )
 
@@ -48,14 +50,14 @@ loop:
 
 		select {
 		case r := <-sd.Error():
-			fmt.Printf("Error: %v", fmt.Errorf("%w\n", r))
+			log.Printf("Error: %v", r)
 
 		default:
 		}
 		select {
 		case r := <-sd.Progress():
 			r1, r2 := r.Folders, r.Files
-			fmt.Printf("folders: %d files: %d\n", r1, r2)
+			log.Printf("folders: %d files: %d\n", r1, r2)
 			if r.Done {
 				break loop
 			}
@@ -65,7 +67,7 @@ loop:
 	}
 
 	elapsed1 := time.Now().Sub(begin1).Seconds()
-	fmt.Printf("time spent: %f s\n", elapsed1)
+	log.Printf("time spent: %f s\n", elapsed1)
 
 }
 
@@ -78,14 +80,14 @@ loop:
 	for {
 		select {
 		case err := <-fw2.Error():
-			fmt.Println(err)
+			log.Println(err)
 			break loop
 		default:
 		}
 		select {
 		case r := <-fw2.Progress():
 			r1, r2 := r.Folders, r.Files
-			fmt.Printf("folders: %d files: %d\n", r1, r2)
+			log.Printf("folders: %d files: %d\n", r1, r2)
 			if r.Done {
 				break loop
 			}
@@ -93,7 +95,7 @@ loop:
 	}
 
 	elapsed2 := time.Now().Sub(begin2).Seconds()
-	fmt.Printf("time spent: %f s\n", elapsed2)
+	log.Printf("time spent: %f s\n", elapsed2)
 
 }
 
@@ -103,11 +105,11 @@ func getChange(d *watcher.DriveWatcher) {
 	if e == nil {
 		for _, i := range changes {
 			if !i.Removed {
-				fmt.Printf("change: %v %v %v %v %v\n", i.Time,
+				log.Printf("change: %v %v %v %v %v\n", i.Time,
 					i.File.Name, i.FileId, i.File.Parents,
 					i.ChangeType)
 			} else {
-				fmt.Printf("change: %v %v %v\n", i.Time,
+				log.Printf("change: %v %v %v\n", i.Time,
 					i.ChangeType, i.FileId)
 			}
 
@@ -149,14 +151,21 @@ func watchLocal() {
 		log.Fatalln(err)
 	}
 	defer lw.Close()
-	time.Sleep(1000 * time.Second)
+	time.Sleep(5000 * time.Second)
+}
+
+func profile() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
 }
 
 var userID string
 
 func main() {
+	profile()
 	config, err := settings.ReadDriveConfig()
-	fmt.Printf("setting error: %v\n", err)
+	log.Printf("setting error: %v\n", err)
 	userID = config.Add("duckfat0000@gmail.com",
 		"/home/kie/test")
 	defer settings.SaveDriveConfig()

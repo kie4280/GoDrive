@@ -164,7 +164,7 @@ func (lh *ListHdl) recursiveFoldsearch(args interface{}) {
 			aa.ModTime = fol.ModTime().UTC().Format(time.RFC3339)
 			aa.Dir = folderRel
 			aa.Name = fol.Name()
-			lh.storeW.WriteFold(relpath+"/", aa, true)
+			lh.storeW.WriteFold(relpath, aa, true)
 			atomic.AddInt32(&lh.foldcount, 1)
 		} else {
 

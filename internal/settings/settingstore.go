@@ -135,7 +135,7 @@ func (gc *Global) Add(account string, localRoot string) string {
 		gc.AccountIDs = append(gc.AccountIDs, id)
 		cc := new(User)
 		cc.AccountName = account
-		cc.LocalRoot = localRoot
+		cc.LocalRoot = filepath.Clean(localRoot)
 		gc.Users[id] = cc
 	}
 
