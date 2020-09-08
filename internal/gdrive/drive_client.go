@@ -10,7 +10,6 @@ import (
 	"godrive/internal/utils"
 	googledrive "google.golang.org/api/drive/v3"
 	"io"
-	"log"
 	"os"
 	"path"
 	"regexp"
@@ -47,6 +46,8 @@ var (
 	// ErrNoResponse is the error thrown when the command does return
 	// ACK before timeout
 	ErrNoResponse = errors.New("There is no response from the receiver")
+	// ErrJammed the command channel is jammed
+	ErrJammed = errors.New("The command channel is jammed")
 )
 
 // DriveClient represents a google drive client object
@@ -192,7 +193,7 @@ func (drive *DriveClient) ListAll() *ListHdl {
 	}
 	result := new(ListHdl)
 	result.progressChan = make(chan *ListProgress, 5)
-	result.errChan = make(chan error, 5)
+	result.errChan = make(chan error)
 	result.commandChan = make(chan int8)
 	result.replyChan = make(chan int8)
 	result.drive = drive
@@ -476,14 +477,18 @@ func (dl *DownloadHdl) SendComd(command int8) error {
 	if !dl.isRunning {
 		return ErrTerminated
 	}
+	var sent bool = false
 	start := time.Now()
 	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
 		select {
 		case dl.commandChan <- command:
-			return nil
+			sent = true
 		default:
 			time.Sleep(20 * time.Millisecond)
 		}
+	}
+	if !sent {
+		return ErrJammed
 	}
 	start = time.Now()
 	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
@@ -516,14 +521,18 @@ func (ul *UploadHdl) SendComd(command int8) error {
 	if !ul.isRunning {
 		return ErrTerminated
 	}
+	var sent bool = false
 	start := time.Now()
 	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
 		select {
 		case ul.commandChan <- command:
-			return nil
+			sent = true
 		default:
 			time.Sleep(20 * time.Millisecond)
 		}
+	}
+	if !sent {
+		return ErrJammed
 	}
 	start = time.Now()
 	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
@@ -559,7 +568,7 @@ type DownloadHdl struct {
 // Download a file
 func (drive *DriveClient) Download(fileID string, dest string) *DownloadHdl {
 	ch := make(chan *UDLProgress, 5)
-	errChan := make(chan error, 5)
+	errChan := make(chan error)
 	comd := make(chan int8)
 	dd := new(DownloadHdl)
 	dd.downloadProgChan = ch
@@ -619,7 +628,7 @@ type UploadHdl struct {
 func (drive *DriveClient) Upload(metadata *googledrive.File, target string) *UploadHdl {
 	ul := new(UploadHdl)
 	ul.uploadProgChan = make(chan *UDLProgress, 5)
-	ul.errChan = make(chan error, 5)
+	ul.errChan = make(chan error)
 	ul.commandChan = make(chan int8)
 	ul.replyChan = make(chan int8)
 	ul.drive = drive

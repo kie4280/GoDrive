@@ -1,59 +1,40 @@
 package watcher
 
 import (
-	"errors"
 	"godrive/internal/settings"
 	"io/ioutil"
-	"log"
 	"os"
 	"path"
-	"strings"
 	"sync"
 	// "syscall"
 	// "runtime"
+	"log"
 	"time"
-)
-
-const (
-	// Moved file has only been moved or renamed
-	Moved int8 = 1
-	// Removed file has been removed
-	Removed int8 = 2
-	// Modified file has only been written to or created
-	Modified int8 = 3
-	// Created file is created
-	Created int8 = 4
-)
-
-const ()
-
-var (
-	// ErrChildBeforeParent this shouldn't normally happen
-	ErrChildBeforeParent = errors.New("children created before parent")
-)
-
-const (
-	defaultPollingInterv int = 10
 )
 
 // LocalWatcher is the object returned by RegfsWatcher
 type LocalWatcher struct {
-	lastSync      time.Time
-	userID        string
-	localRoot     string
-	canRun        bool
-	isRunning     bool
-	pollingInterv int
-	user          settings.UserConfig
-	globalError   error
-	rootFold      *fileStruct
-	checkLock     sync.Mutex
-	fstructPool   sync.Pool
-	prevFiles     map[string]*fileStruct
-	prevFolds     map[string]*fileStruct
-	newFiles      map[string]*fileStruct
-	newFolds      map[string]*fileStruct
-	changeItems   []*FileChange
+	lastSync    time.Time
+	userID      string
+	localRoot   string
+	canRun      bool
+	ready       bool
+	isRunning   bool
+	startWait   sync.WaitGroup
+	user        settings.UserConfig
+	globalError error
+	rootFold    *fileStruct
+	checkLock   sync.Mutex
+	fstructPool sync.Pool
+	commandChan chan int8
+	replyChan   chan int8
+	errChan     chan error
+	changeChan  chan []*FileChange
+	prevFiles   map[string]*fileStruct
+	prevFolds   map[string]*fileStruct
+	newFiles    map[string]*fileStruct
+	newFolds    map[string]*fileStruct
+	changeList  []*FileChange
 }
 
 // FileChange represents the change to a file
@@ -78,10 +59,11 @@ func RegfsWatcher(id string) (*LocalWatcher, error) {
 	lw := new(LocalWatcher)
 	var err error
 
-	lw.isRunning = false
+	lw.isRunning = true
+	lw.ready = false
+	lw.startWait.Add(1)
 	lw.userID = id
-	lw.pollingInterv = defaultPollingInterv
-	lw.lastSync = time.Now()
+
 	settingstore, err := settings.ReadDriveConfig()
 	if err != nil {
 		return nil, err
@@ -91,46 +73,45 @@ func RegfsWatcher(id string) (*LocalWatcher, error) {
 		return nil, err
 	}
 	lw.localRoot = lw.user.GetLocalRoot()
-
+	lw.commandChan = make(chan int8)
+	lw.replyChan = make(chan int8)
+	lw.errChan = make(chan error)
+	lw.changeChan = make(chan []*FileChange)
 	lw.newFiles = make(map[string]*fileStruct)
 	lw.newFolds = make(map[string]*fileStruct)
 	lw.prevFiles = make(map[string]*fileStruct)
 	lw.prevFolds = make(map[string]*fileStruct)
-	lw.changeItems = make([]*FileChange, 0, 200)
+	lw.changeList = make([]*FileChange, 0, localChangeListSize)
 
-	go func() {
-
-		lw.canRun = true
-		// initial snapshot of root folder
-		lw.recurseFold("/")
-		lw.createSnapshot()
-		lw.start()
-	}()
+	go lw.start()
 	return lw, nil
 }
 
 func (lw *LocalWatcher) onLocalError() {
 	if err := recover(); err != nil {
 		err1 := err.(error)
-		lw.globalError = err1
-		log.Println("error", err1)
+		lw.errChan <- err1
+		lw.isRunning = false
+		lw.canRun = false
+		lw.ready = false
+
 	}
 }
 
+// watcher main event loop
 func (lw *LocalWatcher) start() {
 	defer lw.onLocalError()
-	prev := time.Now()
-	// watcher main event loop
-	for lw.canRun {
-		if int(time.Now().Sub(prev).Truncate(time.Second).
-			Seconds()) >= lw.pollingInterv {
-			lw.check()
-			prev = time.Now()
-
-		} else {
-			time.Sleep(1 * time.Second)
-		}
-	}
+	defer func() {
+		lw.isRunning = false
+		lw.ready = false
+	}()
+	lw.canRun = true
+	// initial snapshot of root folder
+	lw.recurseFold("/")
+	lw.createSnapshot()
+	lw.ready = true
+	lw.lastSync = time.Now()
+	lw.getComd()
 }
 
 func (lw *LocalWatcher) recurseFold(ph string) {
@@ -177,21 +158,22 @@ func (lw *LocalWatcher) createSnapshot() {
 	}
 	lw.prevFiles = lw.newFiles
 	lw.prevFolds = lw.newFolds
-
 	lw.newFiles = make(map[string]*fileStruct)
 	lw.newFolds = make(map[string]*fileStruct)
 
 }
 
-// getDiff returns [created, removed, moved, modified]
 func (lw *LocalWatcher) getDiff() {
+	lw.checkLock.Lock()
+	defer lw.checkLock.Unlock()
 	createdMap := make(map[string]*fileStruct)
 	removedMap := make(map[string]*fileStruct)
-	lw.changeItems = lw.changeItems[:0]
+	lw.changeList = lw.changeList[:0]
 
 	for cfiK, cfiV := range lw.newFiles {
 		f, ok := lw.prevFiles[cfiK]
 		if ok {
+
 			sameModTime := f.stat.ModTime().Equal(cfiV.stat.ModTime())
 			same, err := sameFile(f.stat, cfiV.stat)
 			checkErr(err)
@@ -201,7 +183,8 @@ func (lw *LocalWatcher) getDiff() {
 				fc.IsDir = false
 				fc.NewPath = cfiK
 				fc.OldPath = fc.NewPath
-				lw.changeItems = append(lw.changeItems, fc)
+				lw.changeList = append(lw.changeList, fc)
+				log.Println(cfiK, f.relpath)
 			}
 		} else {
 			createdMap[cfiK] = cfiV
@@ -225,7 +208,7 @@ func (lw *LocalWatcher) getDiff() {
 				fc.IsDir = false
 				fc.NewPath = ck
 				fc.OldPath = rk
-				lw.changeItems = append(lw.changeItems, fc)
+				lw.changeList = append(lw.changeList, fc)
 			}
 		}
 	}
@@ -236,7 +219,7 @@ func (lw *LocalWatcher) getDiff() {
 		fc.IsDir = false
 		fc.NewPath = ck
 		fc.OldPath = ""
-		lw.changeItems = append(lw.changeItems, fc)
+		lw.changeList = append(lw.changeList, fc)
 	}
 
 	for rk := range removedMap {
@@ -245,42 +228,98 @@ func (lw *LocalWatcher) getDiff() {
 		fc.IsDir = false
 		fc.NewPath = ""
 		fc.OldPath = rk
-		lw.changeItems = append(lw.changeItems, fc)
+		lw.changeList = append(lw.changeList, fc)
 	}
-}
+	lw.createSnapshot()
 
-func (lw *LocalWatcher) unWatch(target string) {
-
-}
-
-func getPathList(p string) []string {
-	pp := path.Clean(p)
-	return strings.Split(pp, "/")[1:]
 }
 
 func createFile(relpath string, stat os.FileInfo) *fileStruct {
 	nn := fstructPool.Get().(*fileStruct)
+	// nn := new(fileStruct)
 	nn.relpath = relpath
 	nn.stat = stat
 	return nn
 }
 
-// GetLocalChanges gets the changes since watcher registered or the
-// last call to GetLocalChanges()
-func (lw *LocalWatcher) GetLocalChanges() ([]*FileChange, error) {
-
-	if lw.globalError != nil {
-		return nil, lw.globalError
-	}
-
-	changes := make([]*FileChange, 0, localChangeListSize)
-	// copy(changes, lw.changeList)
-	// lw.changeList = make([]*FileChange, localChangeListSize)
-	return changes, nil
+// ChangeChan returns the channel of changes made
+func (lw *LocalWatcher) ChangeChan() <-chan []*FileChange {
+	return lw.changeChan
 }
 
-// Close all resources
-func (lw *LocalWatcher) Close() {
+// Error returns the error channel
+func (lw *LocalWatcher) Error() <-chan error {
+	return lw.errChan
+}
 
-	lw.canRun = false
+// SendComd send the command to the local watcher
+func (lw *LocalWatcher) SendComd(command int8) error {
+	lw.startWait.Wait()
+	if !lw.isRunning {
+		return ErrTerminated
+	}
+	var sent bool = false
+	start := time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case lw.commandChan <- command:
+			sent = true
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !sent {
+		return ErrJammed
+	}
+	start = time.Now()
+	for time.Now().Sub(start).Milliseconds() <= 500 { // timeout is 500ms
+		select {
+		case response := <-lw.replyChan:
+
+			switch response {
+
+			case S_ACK:
+			}
+
+			return nil
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	return ErrNoResponse
+
+}
+
+func (lw *LocalWatcher) getComd() {
+	lw.startWait.Done()
+	for lw.isRunning {
+
+		b := <-lw.commandChan
+		switch b {
+		case C_CANCEL:
+			lw.canRun = false
+			lw.replyChan <- S_ACK
+		case C_GET_CHANGE:
+			if lw.ready {
+				lw.replyChan <- S_ACK
+				go func() {
+					lw.recurseFold("/")
+					lw.getDiff()
+					
+					changes := make([]*FileChange, len(lw.changeList))
+					copy(changes, lw.changeList)
+					lw.changeChan <- changes
+				}()
+			} else {
+				lw.replyChan <- S_NOT_READY
+			}
+
+		default: // unrecognized command. return command to chan
+			lw.commandChan <- b
+			time.Sleep(100 * time.Millisecond) // prevent further reading
+		}
+
+	}
+
 }

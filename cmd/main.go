@@ -150,8 +150,29 @@ func watchLocal() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	defer lw.Close()
-	time.Sleep(5000 * time.Second)
+	defer lw.SendComd(watcher.C_CANCEL)
+	for {
+		for err := lw.SendComd(watcher.C_GET_CHANGE); err != nil; {
+			err = lw.SendComd(watcher.C_GET_CHANGE)
+		}
+		select {
+		case err := <-lw.Error():
+			if err != nil {
+				log.Fatalln(err)
+			}
+		default:
+
+		}
+
+		ch := <-lw.ChangeChan()
+		_ = ch
+		for _, i := range ch {
+			log.Println(*i)
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+
 }
 
 func profile() {
