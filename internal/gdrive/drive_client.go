@@ -48,6 +48,9 @@ var (
 	ErrNoResponse = errors.New("There is no response from the receiver")
 	// ErrJammed the command channel is jammed
 	ErrJammed = errors.New("The command channel is jammed")
+	// ErrDuplicated is the error thrown when there are files that have
+	// the same name in a directory
+	ErrDuplicated = errors.New("Duplicated files")
 )
 
 // DriveClient represents a google drive client object
@@ -418,7 +421,7 @@ func (lh *ListHdl) getComd() {
 		switch b {
 		case C_CANCEL:
 			lh.drive.canRunList = false
-			lh.commandChan <- S_ACK
+			lh.replyChan <- S_ACK
 		case C_QUERY:
 			lh.replyChan <- S_ACK
 		default:

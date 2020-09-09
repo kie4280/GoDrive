@@ -119,7 +119,8 @@ func NewService(id string) (*drive.Service, error) {
 	}
 
 	// If modifying these scopes, delete your previously saved token.json.
-	config, err := google.ConfigFromJSON(b, drive.DriveScope)
+	config, err := google.ConfigFromJSON(b, drive.DriveScope,
+		drive.DriveAppdataScope)
 	if err != nil {
 		return nil, utils.NewError(ErrParseError, err)
 	}

@@ -8,7 +8,6 @@ import (
 	"sync"
 	// "syscall"
 	// "runtime"
-	"log"
 	"time"
 )
 
@@ -24,7 +23,6 @@ type LocalWatcher struct {
 	user        settings.UserConfig
 	globalError error
 	rootFold    *fileStruct
-	checkLock   sync.Mutex
 	fstructPool sync.Pool
 	commandChan chan int8
 	replyChan   chan int8
@@ -125,28 +123,13 @@ func (lw *LocalWatcher) recurseFold(ph string) {
 		childRel := path.Join(ph, i.Name())
 		if i.IsDir() {
 			ff := createFile(childRel, i)
-			lw.newFolds[ph] = ff
+			lw.newFolds[childRel] = ff
 			lw.recurseFold(childRel)
 		} else {
 			nf := createFile(childRel, i)
 			lw.newFiles[childRel] = nf
 		}
 	}
-}
-
-func (lw *LocalWatcher) check() {
-	lw.checkLock.Lock()
-	defer lw.checkLock.Unlock()
-	for _, v := range lw.newFiles {
-		fstructPool.Put(v)
-	}
-	for _, v := range lw.newFolds {
-		fstructPool.Put(v)
-	}
-	lw.newFiles = make(map[string]*fileStruct)
-	lw.newFolds = make(map[string]*fileStruct)
-	lw.recurseFold("/")
-
 }
 
 func (lw *LocalWatcher) createSnapshot() {
@@ -164,11 +147,60 @@ func (lw *LocalWatcher) createSnapshot() {
 }
 
 func (lw *LocalWatcher) getDiff() {
-	lw.checkLock.Lock()
-	defer lw.checkLock.Unlock()
 	createdMap := make(map[string]*fileStruct)
 	removedMap := make(map[string]*fileStruct)
 	lw.changeList = lw.changeList[:0]
+
+	for cfiK, cfiV := range lw.newFolds {
+		if _, ok := lw.prevFolds[cfiK]; !ok {
+			createdMap[cfiK] = cfiV
+		}
+	}
+
+	for pfiK, pfiV := range lw.prevFolds {
+		if _, ok := lw.newFolds[pfiK]; !ok {
+			removedMap[pfiK] = pfiV
+		}
+	}
+
+	for ck, cv := range createdMap {
+		for rk, rv := range removedMap {
+
+			sameID, err := sameFile(cv.stat, rv.stat)
+			checkErr(err)
+			if sameID {
+				delete(createdMap, ck)
+				delete(removedMap, rk)
+				fc := new(FileChange)
+				fc.ChangeType = Moved
+				fc.IsDir = true
+				fc.NewPath = ck
+				fc.OldPath = rk
+				lw.changeList = append(lw.changeList, fc)
+			}
+		}
+	}
+
+	for ck := range createdMap {
+		fc := new(FileChange)
+		fc.ChangeType = Created
+		fc.IsDir = true
+		fc.NewPath = ck
+		fc.OldPath = ""
+		lw.changeList = append(lw.changeList, fc)
+	}
+
+	for rk := range removedMap {
+		fc := new(FileChange)
+		fc.ChangeType = Removed
+		fc.IsDir = true
+		fc.NewPath = ""
+		fc.OldPath = rk
+		lw.changeList = append(lw.changeList, fc)
+	}
+
+	createdMap = make(map[string]*fileStruct)
+	removedMap = make(map[string]*fileStruct)
 
 	for cfiK, cfiV := range lw.newFiles {
 		f, ok := lw.prevFiles[cfiK]
@@ -184,7 +216,6 @@ func (lw *LocalWatcher) getDiff() {
 				fc.NewPath = cfiK
 				fc.OldPath = fc.NewPath
 				lw.changeList = append(lw.changeList, fc)
-				log.Println(cfiK, f.relpath)
 			}
 		} else {
 			createdMap[cfiK] = cfiV
@@ -230,7 +261,6 @@ func (lw *LocalWatcher) getDiff() {
 		fc.OldPath = rk
 		lw.changeList = append(lw.changeList, fc)
 	}
-	lw.createSnapshot()
 
 }
 
@@ -306,7 +336,7 @@ func (lw *LocalWatcher) getComd() {
 				go func() {
 					lw.recurseFold("/")
 					lw.getDiff()
-					
+					lw.createSnapshot()
 					changes := make([]*FileChange, len(lw.changeList))
 					copy(changes, lw.changeList)
 					lw.changeChan <- changes

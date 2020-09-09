@@ -153,6 +153,7 @@ func watchLocal() {
 	defer lw.SendComd(watcher.C_CANCEL)
 	for {
 		for err := lw.SendComd(watcher.C_GET_CHANGE); err != nil; {
+			log.Println(err)
 			err = lw.SendComd(watcher.C_GET_CHANGE)
 		}
 		select {
