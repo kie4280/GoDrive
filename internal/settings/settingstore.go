@@ -15,18 +15,18 @@ This is where the settings for the whole program is stored.
 
 */
 
-// DriveConfig contains all the possible settings
-type DriveConfig interface {
+// DriveConfigHandle is the handle to all the possible settings
+type DriveConfigHandle interface {
 	Add(string, string) string
 	ListIDs() []string
-	GetUser(string) (UserConfig, error)
+	GetUser(string) (UserConfigHandle, error)
 	Delete(string)
 }
 
-// UserConfig is the interface returned by GetUser
-type UserConfig interface {
+// UserConfigHandle is the interface returned by GetUser
+type UserConfigHandle interface {
 	GetAccountName() string
-	GetLocalRoot() string
+	GetSyncRoot() string
 	IsIgnored(string) bool
 }
 
@@ -41,7 +41,7 @@ type Global struct {
 // User contains the setting of a particular user
 type User struct {
 	AccountName string
-	LocalRoot   string
+	syncDir     string
 	Excluded    []string
 	userLock    sync.Mutex
 }
@@ -55,7 +55,7 @@ var (
 )
 
 // ReadDriveConfig reads the google drive configs from the config file
-func ReadDriveConfig() (DriveConfig, error) {
+func ReadDriveConfig() (DriveConfigHandle, error) {
 	fileLock.Lock()
 	defer fileLock.Unlock()
 	if globalConfig != nil {
@@ -82,9 +82,8 @@ func ReadDriveConfig() (DriveConfig, error) {
 	}
 	config := new(Global)
 	err = json.NewDecoder(file).Decode(config)
-	out := new(Global)
-	globalConfig = out
-	return out, err
+	globalConfig = config
+	return config, err
 }
 
 // SaveDriveConfig saves the configuration of a user to file
@@ -95,7 +94,7 @@ func SaveDriveConfig() error {
 	if err != nil {
 		panic(err)
 	}
-	configPath := filepath.Join(homedir, ".GoDrive", "globalConfig.json")
+	configPath := filepath.Join(homedir, ".GoDrive", "driveconfig.json")
 	err = os.MkdirAll(filepath.Join(homedir, ".GoDrive"), 0777)
 	if err != nil {
 		return err
@@ -116,7 +115,7 @@ func (gc *Global) ListIDs() []string {
 }
 
 // GetUser the user with "id"
-func (gc *Global) GetUser(id string) (UserConfig, error) {
+func (gc *Global) GetUser(id string) (UserConfigHandle, error) {
 	ur, ok := gc.Users[id]
 	if !ok {
 		return nil, ErrNoSuchUser
@@ -135,7 +134,7 @@ func (gc *Global) Add(account string, localRoot string) string {
 		gc.AccountIDs = append(gc.AccountIDs, id)
 		cc := new(User)
 		cc.AccountName = account
-		cc.LocalRoot = filepath.Clean(localRoot)
+		cc.syncDir = filepath.Clean(localRoot)
 		gc.Users[id] = cc
 	}
 
@@ -162,9 +161,9 @@ func (uc *User) GetAccountName() string {
 	return uc.AccountName
 }
 
-// GetLocalRoot gets local root
-func (uc *User) GetLocalRoot() string {
-	return uc.LocalRoot
+// GetSyncRoot gets local root
+func (uc *User) GetSyncRoot() string {
+	return uc.syncDir
 }
 
 // IsIgnored returns whether the file or folder is ignored

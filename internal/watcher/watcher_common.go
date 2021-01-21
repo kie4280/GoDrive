@@ -5,8 +5,10 @@ import (
 )
 
 const (
-	remoteChangeListSize = 100
-	localChangeListSize  = 200
+	// RemoteChangeListSize blah
+	RemoteChangeListSize = 100
+	// LocalChangeListSize blah
+	LocalChangeListSize = 200
 )
 
 const (
@@ -43,9 +45,3 @@ var (
 	// ErrJammed the command channel is jammed
 	ErrJammed = errors.New("The command channel is jammed")
 )
-
-func checkErr(err error) {
-	if err != nil {
-		panic(err)
-	}
-}

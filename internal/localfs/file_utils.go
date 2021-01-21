@@ -48,7 +48,7 @@ func NewClient(userID string) (*LocalClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	ws.rootDir = user.GetLocalRoot()
+	ws.rootDir = user.GetSyncRoot()
 	ws.canRunList = false
 	ws.store, err = NewStore(userID)
 	if err != nil {

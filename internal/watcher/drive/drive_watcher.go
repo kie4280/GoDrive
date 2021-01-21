@@ -1,4 +1,4 @@
-package watcher
+package gdwatch
 
 import (
 	"godrive/internal/googleclient"

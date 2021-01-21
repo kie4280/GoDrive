@@ -1,8 +1,11 @@
 package localfs
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
+	// import driver
+	_ "github.com/mattn/go-sqlite3"
 	"godrive/internal/settings"
 	"os"
 	"path/filepath"
@@ -11,16 +14,14 @@ import (
 
 // LCStore is the struct to store state
 type LCStore struct {
-	accessMux    sync.Mutex
-	accessID     int
-	accessCond   *sync.Cond
-	localRoot    string
-	driveFileMap map[string]*FileHolder
-	driveFoldMap map[string]*FoldHolder
-	pathMap      map[string]string
-	id           int
-	userID       string
-	isSaving     bool
+	accessMux  sync.Mutex
+	accessID   int
+	accessCond *sync.Cond
+	localRoot  string
+	sqlConn    *sql.DB
+	id         int
+	userID     string
+	isSaving   bool
 }
 
 // AccessLock is the handle to access the locked resource
@@ -85,8 +86,8 @@ type FoldHolder struct {
 	Dir         string
 }
 
-// NewStore new drive state storage
-func NewStore(id string) (*LCStore, error) {
+// Store returns the local store for user "id"
+func Store(id string) (*LCStore, error) {
 	set, err := settings.ReadDriveConfig()
 	if err != nil {
 		return nil, err
@@ -99,16 +100,19 @@ func NewStore(id string) (*LCStore, error) {
 	gs, ok := drivestore[id]
 	if !ok {
 		gs = new(LCStore)
-		gs.driveFileMap = make(map[string]*FileHolder, 10000)
-		gs.driveFoldMap = make(map[string]*FoldHolder, 10000)
-		gs.pathMap = make(map[string]string, 10000)
+		var err error
+		gs.sqlConn, err = sql.Open("sqlite3", filepath.Join(local.GetSyncRoot(),
+			".GDrive/local/fs_state.db"))
+		if err != nil {
+			return nil, err
+		}
 		gs.id = 0
 		gs.accessID = -1
 		gs.accessCond = sync.NewCond(&gs.accessMux)
 		drivestore[id] = gs
 	}
 
-	gs.localRoot = local.GetLocalRoot()
+	gs.localRoot = local.GetSyncRoot()
 	gs.userID = id
 
 	return gs, nil
@@ -297,6 +301,26 @@ func (al *AccessLock) DeleteIDMap(path string, blocking bool) error {
 	return nil
 }
 
+// Release the hold on the resource acquired
+func (al *AccessLock) Release() error {
+	al.gs.accessCond.L.Lock()
+	defer al.gs.accessCond.L.Unlock()
+	if al.gs.accessID != -1 && al.id != -1 {
+
+		if al.gs.accessID == al.id {
+			al.gs.accessID = -1
+			al.gs.accessCond.Broadcast()
+			return nil
+		}
+		return ErrInvaID
+	}
+	if al.id == -1 {
+		return nil
+	}
+	return ErrAlRelease
+
+}
+
 // AcquireWrite acquires write to the resource.
 // args: (blocking: block if set to true, otherwise return ErrInUse
 // if drive state is under heavy modification)
@@ -336,26 +360,6 @@ func (gs *LCStore) IsLocked() bool {
 	gs.accessCond.L.Lock()
 	defer gs.accessCond.L.Unlock()
 	return gs.accessID != -1
-
-}
-
-// Release the hold on the resource acquired
-func (al *AccessLock) Release() error {
-	al.gs.accessCond.L.Lock()
-	defer al.gs.accessCond.L.Unlock()
-	if al.gs.accessID != -1 && al.id != -1 {
-
-		if al.gs.accessID == al.id {
-			al.gs.accessID = -1
-			al.gs.accessCond.Broadcast()
-			return nil
-		}
-		return ErrInvaID
-	}
-	if al.id == -1 {
-		return nil
-	}
-	return ErrAlRelease
 
 }
 
@@ -405,6 +409,22 @@ func (gs *LCStore) writeFolds(foldList string, foldIDmap string) {
 
 // Save the current drive state to the files as (foldList, fileList, foldIDMap)
 func (gs *LCStore) Save(foldList string, fileList string, foldIDMap string) {
+	gs.accessMux.Lock()
+	defer gs.accessMux.Unlock()
+	if gs.isSaving {
+		return
+	}
+	gs.isSaving = true
+	defer func() {
+		gs.isSaving = false
+	}()
+	gs.writeFiles(fileList)
+	gs.writeFolds(foldList, foldIDMap)
+
+}
+
+// Exist the current drive state to the files as (foldList, fileList, foldIDMap)
+func (gs *LCStore) Exist(foldList string, fileList string, foldIDMap string) {
 	gs.accessMux.Lock()
 	defer gs.accessMux.Unlock()
 	if gs.isSaving {

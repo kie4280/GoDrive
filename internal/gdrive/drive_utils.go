@@ -196,7 +196,7 @@ func (drive *DriveClient) ListAll() *ListHdl {
 	}
 	result := new(ListHdl)
 	result.progressChan = make(chan *ListProgress, 5)
-	result.errChan = make(chan error)
+	result.errChan = make(chan error, 5)
 	result.commandChan = make(chan int8)
 	result.replyChan = make(chan int8)
 	result.drive = drive
@@ -571,7 +571,7 @@ type DownloadHdl struct {
 // Download a file
 func (drive *DriveClient) Download(fileID string, dest string) *DownloadHdl {
 	ch := make(chan *UDLProgress, 5)
-	errChan := make(chan error)
+	errChan := make(chan error, 5)
 	comd := make(chan int8)
 	dd := new(DownloadHdl)
 	dd.downloadProgChan = ch
@@ -631,7 +631,7 @@ type UploadHdl struct {
 func (drive *DriveClient) Upload(metadata *googledrive.File, target string) *UploadHdl {
 	ul := new(UploadHdl)
 	ul.uploadProgChan = make(chan *UDLProgress, 5)
-	ul.errChan = make(chan error)
+	ul.errChan = make(chan error, 5)
 	ul.commandChan = make(chan int8)
 	ul.replyChan = make(chan int8)
 	ul.drive = drive

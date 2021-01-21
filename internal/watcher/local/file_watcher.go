@@ -1,4 +1,4 @@
-package watcher
+package fswatch
 
 import (
 	"godrive/internal/settings"
@@ -8,6 +8,8 @@ import (
 	"sync"
 	// "syscall"
 	// "runtime"
+	"godrive/internal/localfs"
+	wcom "godrive/internal/watcher"
 	"time"
 )
 
@@ -20,14 +22,13 @@ type LocalWatcher struct {
 	ready       bool
 	isRunning   bool
 	startWait   sync.WaitGroup
-	user        settings.UserConfig
+	user        settings.UserConfigHandle
 	globalError error
 	rootFold    *fileStruct
 	fstructPool sync.Pool
 	commandChan chan int8
 	replyChan   chan int8
 	errChan     chan error
-	changeChan  chan []*FileChange
 	prevFiles   map[string]*fileStruct
 	prevFolds   map[string]*fileStruct
 	newFiles    map[string]*fileStruct
@@ -52,34 +53,40 @@ var fstructPool = sync.Pool{New: func() interface{} {
 	return new(fileStruct)
 }}
 
+func checkErr(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
 // RegfsWatcher register a watcher on local fs
-func RegfsWatcher(id string) (*LocalWatcher, error) {
+func RegfsWatcher(userid string) (*LocalWatcher, error) {
 	lw := new(LocalWatcher)
 	var err error
 
 	lw.isRunning = true
 	lw.ready = false
 	lw.startWait.Add(1)
-	lw.userID = id
+	lw.userID = userid
 
 	settingstore, err := settings.ReadDriveConfig()
 	if err != nil {
 		return nil, err
 	}
-	lw.user, err = settingstore.GetUser(id)
+	lw.user, err = settingstore.GetUser(userid)
 	if err != nil {
 		return nil, err
 	}
-	lw.localRoot = lw.user.GetLocalRoot()
-	lw.commandChan = make(chan int8)
-	lw.replyChan = make(chan int8)
-	lw.errChan = make(chan error)
-	lw.changeChan = make(chan []*FileChange)
+	lw.localRoot = lw.user.GetSyncRoot()
+	lw.commandChan = make(chan int8, 1)
+	lw.replyChan = make(chan int8, 5)
+	lw.errChan = make(chan error, 1)
+
 	lw.newFiles = make(map[string]*fileStruct)
 	lw.newFolds = make(map[string]*fileStruct)
 	lw.prevFiles = make(map[string]*fileStruct)
 	lw.prevFolds = make(map[string]*fileStruct)
-	lw.changeList = make([]*FileChange, 0, localChangeListSize)
+	lw.changeList = make([]*FileChange, 0, wcom.LocalChangeListSize)
 
 	go lw.start()
 	return lw, nil
@@ -105,6 +112,7 @@ func (lw *LocalWatcher) start() {
 	}()
 	lw.canRun = true
 	// initial snapshot of root folder
+	store, err := localfs.Store(lw.userID)
 	lw.recurseFold("/")
 	lw.createSnapshot()
 	lw.ready = true
@@ -172,7 +180,7 @@ func (lw *LocalWatcher) getDiff() {
 				delete(createdMap, ck)
 				delete(removedMap, rk)
 				fc := new(FileChange)
-				fc.ChangeType = Moved
+				fc.ChangeType = wcom.Moved
 				fc.IsDir = true
 				fc.NewPath = ck
 				fc.OldPath = rk
@@ -183,7 +191,7 @@ func (lw *LocalWatcher) getDiff() {
 
 	for ck := range createdMap {
 		fc := new(FileChange)
-		fc.ChangeType = Created
+		fc.ChangeType = wcom.Created
 		fc.IsDir = true
 		fc.NewPath = ck
 		fc.OldPath = ""
@@ -192,7 +200,7 @@ func (lw *LocalWatcher) getDiff() {
 
 	for rk := range removedMap {
 		fc := new(FileChange)
-		fc.ChangeType = Removed
+		fc.ChangeType = wcom.Removed
 		fc.IsDir = true
 		fc.NewPath = ""
 		fc.OldPath = rk
@@ -261,6 +269,16 @@ func (lw *LocalWatcher) getDiff() {
 		fc.OldPath = rk
 		lw.changeList = append(lw.changeList, fc)
 	}
+
+}
+
+func (lw *LocalWatcher) check() {
+	lw.recurseFold("/")
+	lw.getDiff()
+	lw.createSnapshot()
+	changes := make([]*FileChange, len(lw.changeList))
+	copy(changes, lw.changeList)
+	lw.changeChan <- changes
 
 }
 
@@ -333,14 +351,7 @@ func (lw *LocalWatcher) getComd() {
 		case C_GET_CHANGE:
 			if lw.ready {
 				lw.replyChan <- S_ACK
-				go func() {
-					lw.recurseFold("/")
-					lw.getDiff()
-					lw.createSnapshot()
-					changes := make([]*FileChange, len(lw.changeList))
-					copy(changes, lw.changeList)
-					lw.changeChan <- changes
-				}()
+				go lw.check()
 			} else {
 				lw.replyChan <- S_NOT_READY
 			}
