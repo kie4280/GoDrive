@@ -1,4 +1,4 @@
-package fswatch
+package fswatcher
 
 import (
 	"godrive/internal/settings"
@@ -29,8 +29,6 @@ type LocalWatcher struct {
 	commandChan chan int8
 	replyChan   chan int8
 	errChan     chan error
-	prevFiles   map[string]*fileStruct
-	prevFolds   map[string]*fileStruct
 	newFiles    map[string]*fileStruct
 	newFolds    map[string]*fileStruct
 	changeList  []*FileChange
@@ -52,12 +50,6 @@ type fileStruct struct {
 var fstructPool = sync.Pool{New: func() interface{} {
 	return new(fileStruct)
 }}
-
-func checkErr(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
 
 // RegfsWatcher register a watcher on local fs
 func RegfsWatcher(userid string) (*LocalWatcher, error) {
@@ -84,8 +76,6 @@ func RegfsWatcher(userid string) (*LocalWatcher, error) {
 
 	lw.newFiles = make(map[string]*fileStruct)
 	lw.newFolds = make(map[string]*fileStruct)
-	lw.prevFiles = make(map[string]*fileStruct)
-	lw.prevFolds = make(map[string]*fileStruct)
 	lw.changeList = make([]*FileChange, 0, wcom.LocalChangeListSize)
 
 	go lw.start()
@@ -113,11 +103,13 @@ func (lw *LocalWatcher) start() {
 	lw.canRun = true
 	// initial snapshot of root folder
 	store, err := localfs.Store(lw.userID)
-	lw.recurseFold("/")
-	lw.createSnapshot()
+	checkErr(err)
+	if !store.Exist() {
+		lw.initializeDB()
+	}
 	lw.ready = true
 	lw.lastSync = time.Now()
-	lw.getComd()
+	lw.processRequest()
 }
 
 func (lw *LocalWatcher) recurseFold(ph string) {
@@ -282,6 +274,14 @@ func (lw *LocalWatcher) check() {
 
 }
 
+func (lw *LocalWatcher) syncDB() {
+
+}
+
+func (lw *LocalWatcher) initializeDB() {
+
+}
+
 func createFile(relpath string, stat os.FileInfo) *fileStruct {
 	nn := fstructPool.Get().(*fileStruct)
 	// nn := new(fileStruct)
@@ -339,7 +339,7 @@ func (lw *LocalWatcher) SendComd(command int8) error {
 
 }
 
-func (lw *LocalWatcher) getComd() {
+func (lw *LocalWatcher) processRequest() {
 	lw.startWait.Done()
 	for lw.isRunning {
 

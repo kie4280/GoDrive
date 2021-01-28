@@ -182,6 +182,12 @@ func profile() {
 	}()
 }
 
+func testLocalDB() {
+	go func() {
+		store, err := localfs.Store()
+	}
+}
+
 var userID string
 
 func main() {
@@ -198,5 +204,7 @@ func main() {
 	// mkdir()
 	watchLocal()
 	// localSync()
+
+	//testLocalDB()
 
 }
